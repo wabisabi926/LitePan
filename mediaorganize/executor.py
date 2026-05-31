@@ -314,11 +314,14 @@ class Executor:
                 return
             before_name = current["name"]
             rename_id = current["id"]
+            old_dir_prefix = str(rename_id) if current.get("is_dir") and self._is_path_file_id(rename_id) else ""
             await self._rename_with_verify(rename_id, action.target_name, action.source_parent_id, before_name)
             if self._is_path_file_id(rename_id):
                 action.source_id = self._renamed_path_id(rename_id, action.target_name)
             else:
                 action.source_id = rename_id
+            if old_dir_prefix:
+                self._remap_path_prefix(old_dir_prefix, action.source_id)
             action.status = "done"
             action.resolved_id = action.source_id
             action.executed_at = self._now_str()
@@ -511,11 +514,14 @@ class Executor:
                     action.executed_at = self._now_str()
                     self.stats["skipped"] += 1
                     return
+            old_dir_prefix = str(rename_id) if current.get("is_dir") and self._is_path_file_id(rename_id) else ""
             await self._rename_with_verify(rename_id, action.target_name, target_parent_id, current_name)
             if self._is_path_file_id(rename_id):
                 action.source_id = self._renamed_path_id(rename_id, action.target_name)
             else:
                 action.source_id = rename_id
+            if old_dir_prefix:
+                self._remap_path_prefix(old_dir_prefix, action.source_id)
             action.status = "done"
             action.resolved_id = action.source_id
             action.executed_at = self._now_str()
@@ -570,14 +576,26 @@ class Executor:
             raise Exception(f"父目录未解析: {action.target_parent_id}")
         source_id = str(action.source_id or "")
         target_name = action.target_name
+        source_label = action.source_name or source_id
+        promoted_from_tv_tree = bool((action.metadata or {}).get("promoted_from_tv_tree"))
 
-        # 降级条件 1：目标下已有同名目录
+        # 降级条件 1：目标下已有同名目录（独立电影提升时仍允许后续 relocate 并入）
         existing = await self._find_child_dir(target_parent_id, target_name)
-        if existing:
+        if existing and not promoted_from_tv_tree:
             action.status = "done"
             action.resolved_id = existing
             self.resolved[action.id] = existing
             self.log(f"[执行] 目标已存在「{target_name}」，复用现有目录")
+            return
+        if existing and promoted_from_tv_tree:
+            action.status = "done"
+            action.resolved_id = existing
+            self.resolved[action.id] = existing
+            self.stats["ensured_dirs"] += 1
+            self.log(
+                f"[执行] 目标已存在「{target_name}」，独立电影将搬入该目录"
+                f"（源：{source_label}）"
+            )
             return
 
         # 降级条件 2：源目录里有未参与整理的文件（防止误带走用户的笔记/草稿）
@@ -589,7 +607,6 @@ class Executor:
         followers = self.plan.diagnostics.get("meta_followers") or []
         planned_meta_dirs = {str(f.get("source_dir_id")) for f in followers if f.get("source_dir_id")}
 
-        source_label = action.source_name or source_id
         try:
             items = await self.driver.list_files(source_id) or []
         except Exception as e:
@@ -602,6 +619,8 @@ class Executor:
         else:
             for it in items:
                 if it.is_dir:
+                    if promoted_from_tv_tree:
+                        continue
                     # 源里有子目录 → 不知道里面有什么，保守降级
                     can_whole_move = False
                     self.log(f"[执行] 源目录「{source_label}」含其它子目录，改用新建目录")
@@ -765,8 +784,18 @@ class Executor:
         try:
             r = await self.driver.delete_file(dir_id)
         except Exception as e:
+            if self._is_already_deleted_error(str(e)):
+                action.status = "done"
+                action.resolved_id = dir_id
+                self.log(f"[执行] 空目录已不存在，视为已清理 {action.source_name or dir_id}")
+                return
             raise Exception(f"删除目录异常: {e}")
         if not r.success:
+            if self._is_already_deleted_error(r.message or ""):
+                action.status = "done"
+                action.resolved_id = dir_id
+                self.log(f"[执行] 空目录已不存在，视为已清理 {action.source_name or dir_id}")
+                return
             raise Exception(f"删除目录失败: {r.message}")
         action.status = "done"
         action.resolved_id = dir_id
@@ -1030,6 +1059,21 @@ class Executor:
         return parent or "/"
 
     @staticmethod
+    def _is_already_deleted_error(message: str) -> bool:
+        text = str(message or "").lower()
+        return any(
+            token in text
+            for token in (
+                "已经删除",
+                "已删除",
+                "不存在",
+                "not found",
+                "not exist",
+                "no such file",
+            )
+        )
+
+    @staticmethod
     def _join_path(parent: str, name: str) -> str:
         parent_norm = str(parent or "").rstrip("/") or "/"
         child_name = str(name or "").strip().strip("/")
@@ -1056,8 +1100,15 @@ class Executor:
         if not old_prefix or old_prefix == new_prefix:
             return
         for action in self.plan.actions:
+            target_parent_id = str(action.target_parent_id or "")
+            if target_parent_id == old_prefix:
+                action.target_parent_id = new_prefix
+            elif target_parent_id.startswith(old_prefix + "/"):
+                action.target_parent_id = new_prefix + target_parent_id[len(old_prefix):]
             if str(action.source_parent_id or "") == old_prefix:
                 action.source_parent_id = new_prefix
+            elif str(action.source_parent_id or "").startswith(old_prefix + "/"):
+                action.source_parent_id = new_prefix + str(action.source_parent_id)[len(old_prefix):]
             source_id = str(action.source_id or "")
             if source_id == old_prefix:
                 action.source_id = new_prefix

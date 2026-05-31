@@ -3207,11 +3207,43 @@ const _episodeNumberFromName = (name) => {
   return null
 }
 
+const _isNumericEpisodeSource = (name) => {
+  if (!name) return false
+  const stem = name.replace(/\.[^.]+$/, '').trim()
+  return /^\d{1,4}(?:\s*(?:4k|2160p|1080p|720p))?$/i.test(stem)
+}
+
+const _formatCollapsedOldPattern = (oldP, items, seasonKey) => {
+  if (oldP.startsWith('NUM{ee}')) {
+    const ext = oldP.slice('NUM{ee}'.length) || '.mp4'
+    const eps = items.map(a => a._ep).filter(v => v != null).sort((a, b) => a - b)
+    if (!eps.length) return `*${ext}`
+    const pad = (n) => String(n).padStart(2, '0')
+    if (eps.length === 1) return `${pad(eps[0])}${ext}`
+    const consecutive = eps.every((ep, i) => i === 0 || ep === eps[i - 1] + 1)
+    if (consecutive) {
+      return `${pad(eps[0])}–${pad(eps[eps.length - 1])}${ext}`
+    }
+    return `${pad(eps[0])}…${pad(eps[eps.length - 1])}${ext}`
+  }
+  return oldP.replace('S{ss}E{ee}', `S${String(seasonKey).padStart(2, '0')}E**`)
+}
+
+const _formatCollapsedNewPattern = (newP, seasonKey) => {
+  return newP.replace('S{ss}E{ee}', `S${String(seasonKey).padStart(2, '0')}E**`)
+}
+
 const _patternOf = (name, season, episode) => {
   if (!name) return ''
   if (season != null && episode != null) {
     const tag = `S${String(season).padStart(2,'0')}E${String(episode).padStart(2,'0')}`
-    return name.split(tag).join('S{ss}E{ee}')
+    if (name.includes(tag)) {
+      return name.split(tag).join('S{ss}E{ee}')
+    }
+    if (_isNumericEpisodeSource(name)) {
+      const ext = name.match(/(\.[^.]+)$/)?.[1] || ''
+      return `NUM{ee}${ext}`
+    }
   }
   return name
 }
@@ -3310,8 +3342,8 @@ const organizePlanGroups = computed(() => {
             actions: items,
             sample: items[0],
             samplePattern: {
-              oldPattern: oldP.replace('S{ss}E{ee}', `S${String(seasonKey).padStart(2,'0')}E**`),
-              newPattern: newP.replace('S{ss}E{ee}', `S${String(seasonKey).padStart(2,'0')}E**`),
+              oldPattern: _formatCollapsedOldPattern(oldP, items, seasonKey),
+              newPattern: _formatCollapsedNewPattern(newP, seasonKey),
             },
           })
         } else {

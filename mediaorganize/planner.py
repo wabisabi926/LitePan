@@ -188,6 +188,48 @@ async def lookup_tmdb_by_id_async(tmdb_id, language, api_key, proxy_url, media_t
     )
 
 
+def _fetch_tv_seasons_sync(tmdb_id: str, language: str, api_key: str, proxy_url: str) -> list:
+    try:
+        import tmdbsimple as tmdb
+        import requests as _requests
+    except Exception:
+        return []
+    try:
+        tid = int(str(tmdb_id).strip())
+    except Exception:
+        return []
+    if tid <= 0:
+        return []
+
+    class TimeoutSession(_requests.Session):
+        def request(self, method, url, **kwargs):
+            kwargs.setdefault("timeout", TMDB_REQUEST_TIMEOUT_SECONDS)
+            return super().request(method, url, **kwargs)
+
+    if api_key:
+        tmdb.API_KEY = api_key
+    session = TimeoutSession()
+    if proxy_url:
+        session.proxies = {"http": proxy_url, "https": proxy_url}
+    with _tmdb_lock:
+        old_session = tmdb.REQUESTS_SESSION
+        tmdb.REQUESTS_SESSION = session
+        try:
+            info = tmdb.TV(tid).info(language=language)
+            seasons = info.get("seasons") if isinstance(info, dict) else None
+            return list(seasons or [])
+        except Exception:
+            return []
+        finally:
+            tmdb.REQUESTS_SESSION = old_session
+
+
+async def fetch_tv_seasons_async(tmdb_id, language, api_key, proxy_url) -> list:
+    return await asyncio.to_thread(
+        _fetch_tv_seasons_sync, tmdb_id, language, api_key, proxy_url
+    )
+
+
 async def validate_tmdb_connection(api_key: str, language: str, proxy_url: str) -> bool:
     def _check() -> bool:
         try:
@@ -366,6 +408,7 @@ class Planner:
         self.ffprobe_interval = (self.settings.get("ffprobe_request_interval_ms") or 3000) / 1000.0
         self.ffprobe_timeout = int(self.settings.get("ffprobe_timeout_seconds") or 30)
         self.ffprobe_concurrency = max(1, int(self.settings.get("ffprobe_concurrency") or 2))
+        self._tv_seasons_cache: Dict[str, list] = {}
 
     def _next_id(self) -> str:
         self.action_seq += 1
@@ -408,8 +451,6 @@ class Planner:
             and isinstance(a.metadata, dict)
             and a.metadata.get("kind_label") == "dir_rename"
         ]
-        if not dir_rename_actions:
-            return
 
         by_target: Dict[Tuple[str, str], List[PlanAction]] = {}
         for a in dir_rename_actions:
@@ -423,10 +464,8 @@ class Planner:
             winning_dir_id = str(winning.source_id)
             for losing in conflicts[1:]:
                 losing_dir_id = str(losing.source_id)
-                # 1) losing 目录改名 → 标 skipped（目录不能跨位置合并，但内部文件可以）
                 losing.status = "skipped"
                 losing.error = f"作品已在「{winning.source_name}」整理，文件已自动并入"
-                # 2) losing 内部文件 → 重定向到 winning 目录（实质上变成 move）
                 for fa in self.actions:
                     if fa is losing or fa is winning:
                         continue
@@ -437,10 +476,9 @@ class Planner:
                     fa.target_parent_id = winning_dir_id
                     deps = list(fa.depends_on or [])
                     if winning.id not in deps:
-                        deps.append(winning.id)  # 必须等 winning 目录改完名
+                        deps.append(winning.id)
                     fa.depends_on = deps
                     fa.reason = (fa.reason or "") + f"（从「{losing.source_name}」合并到「{target_name}」）"
-                # 3) skipped 列表只列目录这一条（用"已合并"措辞，明确是成功而非失败）
                 self.skipped_items.append({
                     "file_id": str(losing.source_id),
                     "file_name": losing.source_name,
@@ -452,6 +490,53 @@ class Planner:
                 self.log(
                     f"[计划] 同作品合并：「{losing.source_name}」内文件自动并入"
                     f"「{winning.source_name}」（目标「{target_name}」）"
+                )
+
+        if self.action_type != "move":
+            return
+
+        work_dir_actions = [
+            a for a in self.actions
+            if a.kind in ("ensure_dir", "move_and_rename_dir")
+            and isinstance(a.metadata, dict)
+            and a.metadata.get("is_work_dir")
+        ]
+        by_work_target: Dict[Tuple[str, str], List[PlanAction]] = {}
+        for a in work_dir_actions:
+            key = (str(a.target_parent_id), a.target_name)
+            by_work_target.setdefault(key, []).append(a)
+
+        for (parent, target_name), conflicts in by_work_target.items():
+            if len(conflicts) < 2:
+                continue
+            winning = conflicts[0]
+            winning_ref = f"ref:{winning.id}"
+            winning_source_id = str((winning.metadata or {}).get("source_dir_id") or winning.source_id or "")
+            for losing in conflicts[1:]:
+                losing_source_id = str((losing.metadata or {}).get("source_dir_id") or losing.source_id or "")
+                losing.status = "skipped"
+                losing.error = f"已并入「{target_name}」"
+                if not losing_source_id or losing_source_id == winning_source_id:
+                    continue
+                for fa in self.actions:
+                    if fa.kind != "relocate":
+                        continue
+                    if str(fa.source_parent_id) != losing_source_id:
+                        continue
+                    fa.target_parent_id = winning_ref
+                    deps = list(fa.depends_on or [])
+                    if winning.id not in deps:
+                        deps.append(winning.id)
+                    fa.depends_on = deps
+                    fa.reason = (fa.reason or "") + f"（合并到「{target_name}」）"
+                self.skipped_items.append({
+                    "file_id": losing_source_id,
+                    "file_name": self.scanned_dir_names.get(losing_source_id, losing_source_id),
+                    "reason": f"已合并到「{target_name}」；源目录内文件将自动搬入该目录",
+                })
+                self.log(
+                    f"[计划] move 同作品合并：源 {losing_source_id} 的文件并入"
+                    f"「{target_name}」（{winning.id}）"
                 )
 
     def _try_whole_dir_move_optimization(self):
@@ -567,16 +652,36 @@ class Planner:
         # 「目标已存在同名」时会降级为复用现有目录，源 dir 不会被整体搬走，里面文件被
         # 一个个搬走后该 dir 也会变空。所以这里**对所有 source dir 都生成 delete_empty_dir**，
         # 让 executor 的 list-and-skip 安全机制决定是否真删（非空就跳过）。
+        dir_relocate_sources: Set[str] = {
+            str(action.source_id or "")
+            for action in self.actions
+            if action.kind == "relocate"
+            and isinstance(action.metadata, dict)
+            and action.metadata.get("kind_label") in ("dir_rename", "season_dir_rename")
+            and action.source_id
+        }
         starts: Set[str] = set()
+        stop_at: Dict[str, str] = {}
         for action in self.actions:
             if action.kind == "relocate":
                 sp = str(action.source_parent_id)
                 if not sp or sp == str(self.parent_id):
                     continue
+                if str(action.target_parent_id) == sp:
+                    continue
+                if sp in dir_relocate_sources:
+                    continue
                 starts.add(sp)
+                target_parent = str(action.target_parent_id or "")
+                if target_parent and self._is_scanned_ancestor(target_parent, sp):
+                    stop_at[sp] = target_parent
                 # 该 source 的原父目录也可能因为本 source 被清空而变空 → 向上递归
                 pp = self.scanned_dir_parents.get(sp)
-                if pp and pp != str(self.parent_id):
+                if (
+                    pp
+                    and pp != str(self.parent_id)
+                    and str(action.target_parent_id) != str(pp)
+                ):
                     starts.add(pp)
             elif action.kind == "move_and_rename_dir":
                 sid = str(action.source_id or "")
@@ -590,8 +695,11 @@ class Planner:
         chain_to_clean: Set[str] = set()
         for start in starts:
             cur = start
+            stop_dir = stop_at.get(start, "")
             depth = 0
             while cur and cur != str(self.parent_id):
+                if stop_dir and cur == stop_dir:
+                    break
                 chain_to_clean.add(cur)
                 cur = self.scanned_dir_parents.get(cur)
                 depth += 1
@@ -644,6 +752,17 @@ class Planner:
             )
             self._add(del_action)
             dir_to_delete_id[d] = del_action.id
+
+    def _is_scanned_ancestor(self, ancestor_id: str, child_id: str) -> bool:
+        cur = str(child_id or "")
+        ancestor = str(ancestor_id or "")
+        depth = 0
+        while cur and depth <= 50:
+            if cur == ancestor:
+                return True
+            cur = self.scanned_dir_parents.get(cur)
+            depth += 1
+        return False
 
     async def _validate_tmdb(self):
         if not self.use_tmdb:
@@ -807,6 +926,9 @@ class Planner:
         self._emit_progress()
 
         groups = self._group_entries(entries)
+        pending_skips = groups.pop("__pending_skips__", [])
+        for file_item, reason in pending_skips:
+            self._skip(file_item, reason)
         self.log(f"[计划] 分组为 {len(groups)} 个作品")
         for (media_kind, dir_id, dir_name, title, _, _, _), items in groups.items():
             marker_text = "有目录" if dir_id else "散落文件"
@@ -824,10 +946,6 @@ class Planner:
 
         for group_key, items in groups.items():
             self.check_stop()
-            if self.action_type == "rename" and self._is_group_already_organized(items):
-                for file_item, _, _, _, _ in items:
-                    self._skip(file_item, "已整理")
-                continue
             if self.max_works_per_run > 0 and self.planned_work_count >= self.max_works_per_run:
                 self.quota_reached = True
                 self.log(f"[计划] 已达到本次最多 {self.max_works_per_run} 部作品上限，剩余作品将在下次重新生成计划时处理")
@@ -838,6 +956,8 @@ class Planner:
 
     def _group_entries(self, entries: List[Tuple[Any, list]]) -> Dict[Tuple, list]:
         groups: Dict[Tuple, list] = defaultdict(list)
+        pending_skips: List[Tuple[Any, str]] = []
+        layout = rules.analyze_tv_tree_layout(entries)
         for file_item, ancestors in entries:
             self.check_stop()
             file_parsed_raw = rules.normalize_parsed_media(rules.parse_filename_strict(file_item.name))
@@ -848,6 +968,10 @@ class Planner:
             for anc_id, anc_name in ancestors:
                 if rules.is_generic_media_dir(anc_name) or rules.is_season_dir_name(anc_name):
                     continue
+                if rules.is_collection_container_dir(anc_name):
+                    continue
+                if rules.is_special_content_dir_name(anc_name):
+                    continue
                 non_special_ancestors.append((anc_id, anc_name))
             if non_special_ancestors:
                 dir_parsed_raw = rules.normalize_parsed_media(rules.parse_dir_name(non_special_ancestors[-1][1]))
@@ -857,23 +981,29 @@ class Planner:
             file_parsed = rules.merge_three_layer_parsed(file_parsed_raw, dir_parsed_raw, root_parsed_raw)
             file_parsed["_part_label"] = rules.extract_part_label(file_item.name)
             file_parsed["_special_label"] = rules.extract_special_label(file_item.name)
-            # 物理季目录优先（Season 00 特别篇不应被文件名兜底 season=1 覆盖）
-            for _, anc_name in reversed(ancestors):
-                if rules.is_season_dir_name(anc_name):
-                    dir_season = rules.parse_season_dir_number(anc_name)
-                    if dir_season is not None:
-                        file_parsed["season"] = dir_season
-                        break
+            file_parsed = rules._prepare_tv_file_parsed(file_parsed, ancestors)
             source_dir_id = ancestors[-1][0] if ancestors else self.parent_id
             source_dir_name = ancestors[-1][1] if ancestors else ""
 
+            nested_movie_id, nested_movie_name = rules.find_nearest_standalone_movie_dir(ancestors)
+            force_movie = bool(nested_movie_id)
+
             tv_rule = rules.looks_like_tv_file(file_parsed, ancestors)
-            is_tv = self.task_media_type == "tv" or (self.task_media_type == "auto" and tv_rule.matched)
+            is_tv = (
+                not force_movie
+                and (self.task_media_type == "tv" or (self.task_media_type == "auto" and tv_rule.matched))
+            )
 
             if is_tv:
                 show_dir_id, show_dir_name, show_parsed = rules.pick_tv_show_info(ancestors, file_parsed)
+                if rules.is_ambiguous_root_tv_scatter(ancestors, layout, show_dir_id):
+                    pending_skips.append((
+                        file_item,
+                        "检测到多季子目录，根目录散落文件无法确定季号，请移入对应季文件夹",
+                    ))
+                    continue
                 title = (show_parsed.get("title") or file_parsed.get("title") or "").strip()
-                year = show_parsed.get("year") or file_parsed.get("year")
+                year = rules.resolve_tv_group_year(show_parsed)
                 key = ("tv", show_dir_id, show_dir_name, title, year, None, None)
                 groups[key].append((file_item, source_dir_id, source_dir_name, file_parsed, ancestors))
                 continue
@@ -881,24 +1011,44 @@ class Planner:
             movie_dir_id = None
             movie_dir_name = None
             movie_parsed: Dict[str, Any] = {}
-            for dir_id, dir_name in reversed(ancestors):
-                # 跳过通用 generic 目录（电影/电视剧/动漫...）和季目录
-                if rules.is_generic_media_dir(dir_name) or rules.is_season_dir_name(dir_name):
-                    continue
-                parsed = rules.normalize_parsed_media(rules.parse_dir_name(dir_name))
-                if parsed.get("title"):
-                    movie_dir_id = dir_id
-                    movie_dir_name = dir_name
-                    movie_parsed = parsed
-                    break
+            if force_movie and nested_movie_id:
+                movie_dir_id = nested_movie_id
+                movie_dir_name = nested_movie_name or ""
+                movie_parsed = rules.normalize_parsed_media(rules.parse_dir_name(movie_dir_name))
+            else:
+                for dir_id, dir_name in reversed(ancestors):
+                    # 跳过通用 generic 目录（电影/电视剧/动漫...）和季目录
+                    if rules.is_generic_media_dir(dir_name) or rules.is_season_dir_name(dir_name):
+                        continue
+                    if rules.is_collection_container_dir(dir_name):
+                        continue
+                    parsed = rules.normalize_parsed_media(rules.parse_dir_name(dir_name))
+                    if parsed.get("title"):
+                        movie_dir_id = dir_id
+                        movie_dir_name = dir_name
+                        movie_parsed = parsed
+                        break
+
+            if not movie_dir_id and ancestors:
+                dir_id, dir_name = ancestors[-1]
+                if (
+                    not rules.is_generic_media_dir(dir_name)
+                    and not rules.is_season_dir_name(dir_name)
+                ):
+                    parsed = rules.normalize_parsed_media(rules.parse_dir_name(dir_name))
+                    if parsed.get("title"):
+                        movie_dir_id = dir_id
+                        movie_dir_name = dir_name
+                        movie_parsed = parsed
 
             if movie_dir_id:
+                group_title, group_year = rules.resolve_movie_group_identity(movie_dir_name, file_parsed)
                 key = (
                     "movie",
                     movie_dir_id,
                     movie_dir_name,
-                    movie_parsed.get("title") or "",
-                    movie_parsed.get("year"),
+                    group_title or movie_parsed.get("title") or "",
+                    group_year if group_year is not None else movie_parsed.get("year"),
                     movie_parsed.get("season"),
                     movie_parsed.get("episode"),
                 )
@@ -913,6 +1063,8 @@ class Planner:
                     file_parsed.get("episode"),
                 )
             groups[key].append((file_item, source_dir_id, source_dir_name, file_parsed, ancestors))
+        if pending_skips:
+            groups["__pending_skips__"] = pending_skips
         return groups
 
     def _compute_align_defaults(self, groups: Dict[Tuple, list]) -> Dict[Tuple, Dict[Tuple, Dict[str, Any]]]:
@@ -986,7 +1138,15 @@ class Planner:
         tmdb_id = tmdb_info.get("tmdb_id", "")
         tmdb_title = tmdb_info.get("tmdb_title", "")
         tmdb_original = tmdb_info.get("tmdb_original", "")
-        if tmdb_info.get("year") and not year:
+        if is_tv and tmdb_id:
+            show_raw = tmdb_info.get("raw") or {}
+            tv_seasons = await self._get_tv_seasons(tmdb_id)
+            series_year = rules.resolve_tmdb_tv_series_year(show_raw, tv_seasons)
+            if series_year:
+                year = series_year
+            elif tmdb_info.get("year") and not year:
+                year = tmdb_info["year"]
+        elif tmdb_info.get("year") and not year:
             year = tmdb_info["year"]
         if tmdb_info.get("title"):
             title = tmdb_info["title"]
@@ -1005,8 +1165,10 @@ class Planner:
             group_dir_meta["group_old_dir_name"] = dir_name
             group_dir_meta["group_new_dir_name"] = new_folder_name
 
-        if self.action_type == "rename" and dir_id and new_folder_name and dir_name and not rules.is_same_generated_name(dir_name, new_folder_name):
-            parent_of_dir = None
+        promoted_movie_parent: Optional[str] = None
+        promoted_move_target: Optional[str] = None
+        parent_of_dir: Optional[str] = None
+        if dir_id and items:
             for fi, _, _, _, ancestors in items:
                 for idx, (anc_id, anc_name) in enumerate(ancestors):
                     if str(anc_id) == str(dir_id):
@@ -1014,28 +1176,80 @@ class Planner:
                         break
                 if parent_of_dir is not None:
                     break
-            if parent_of_dir is None:
-                parent_of_dir = self.parent_id
-            self._add(PlanAction(
-                id=self._next_id(),
-                kind="relocate",
-                source_id=str(dir_id),
-                source_name=dir_name,
-                source_parent_id=str(parent_of_dir),
-                target_parent_id=str(parent_of_dir),
-                target_name=new_folder_name,
-                reason=f"作品目录改名 | {dir_name} -> {new_folder_name}{' | tmdb-' + tmdb_id if tmdb_id else ''}",
-                confidence=tmdb_info.get("confidence", 0.6 if tmdb_id else 0.4),
-                metadata={"tmdb_id": tmdb_id, "media_kind": media_kind, "kind_label": "dir_rename"},
-            ))
+        if parent_of_dir is None:
+            parent_of_dir = self.parent_id
+
+        if media_kind == "movie" and items:
+            _, _, _, _, sample_ancestors = items[0]
+            promoted_movie_parent = rules.get_promoted_movie_parent_id(
+                sample_ancestors,
+                dir_id,
+                self.parent_id,
+                self.scanned_dir_parents,
+            )
+            promoted_move_target = self._resolve_promoted_movie_target_parent(
+                sample_ancestors, dir_id
+            )
+
+        promoted_move_ref = ""
+        if (
+            self.action_type == "move"
+            and media_kind == "movie"
+            and dir_id
+            and promoted_move_target
+        ):
+            promoted_move_ref = self._ensure_promoted_movie_move_action(
+                dir_id,
+                dir_name,
+                promoted_move_target,
+                new_folder_name,
+                tmdb_id,
+                tmdb_info.get("confidence", 0.6 if tmdb_id else 0.4),
+            )
+
+        if self.action_type == "rename" and dir_id and new_folder_name and dir_name:
+            target_parent_for_dir = promoted_movie_parent or str(parent_of_dir)
+            needs_rename = not rules.is_same_generated_name(dir_name, new_folder_name)
+            needs_promote = (
+                promoted_movie_parent
+                and str(parent_of_dir) != str(promoted_movie_parent)
+            )
+            if needs_rename or needs_promote:
+                dir_reason = f"作品目录改名 | {dir_name} -> {new_folder_name}{' | tmdb-' + tmdb_id if tmdb_id else ''}"
+                if needs_promote:
+                    dir_reason = (
+                        f"独立电影移出剧集目录 | {dir_name} -> {new_folder_name}"
+                        f"{' | tmdb-' + tmdb_id if tmdb_id else ''}"
+                    )
+                self._add(PlanAction(
+                    id=self._next_id(),
+                    kind="relocate",
+                    source_id=str(dir_id),
+                    source_name=dir_name,
+                    source_parent_id=str(parent_of_dir),
+                    target_parent_id=target_parent_for_dir,
+                    target_name=new_folder_name if needs_rename else dir_name,
+                    reason=dir_reason,
+                    confidence=tmdb_info.get("confidence", 0.6 if tmdb_id else 0.4),
+                    metadata={
+                        "tmdb_id": tmdb_id,
+                        "media_kind": media_kind,
+                        "kind_label": "dir_rename",
+                        "promoted_from_tv_tree": bool(needs_promote),
+                    },
+                ))
 
         ffprobe_results: Dict[str, dict] = {}
         if self.use_ffprobe:
             ffprobe_results = await self._batch_ffprobe(items)
 
-        target_work_id_or_ref = self._ensure_work_dir_action(group_key, new_folder_name, items)
+        target_work_id_or_ref = self._ensure_work_dir_action(
+            group_key, new_folder_name, items, promoted_move_ref=promoted_move_ref
+        )
 
         season_dir_cache: Dict[int, str] = {}
+        tv_seasons_cache: Optional[list] = None
+        season_dir_rename_cache: Dict[str, PlanAction] = {}
 
         for file_item, source_dir_id, source_dir_name, file_parsed, ancestors in items:
             self.check_stop()
@@ -1043,8 +1257,34 @@ class Planner:
             current_year = year
             current_season = file_parsed.get("season") if is_tv else season
             current_episode = file_parsed.get("episode") if is_tv else episode
+            if is_tv and tmdb_id:
+                ctx = rules.get_nearest_tv_dir_context(ancestors)
+                if ctx.get("kind") == "season" and ctx.get("season") is not None:
+                    current_season = ctx.get("season")
+                elif ctx.get("kind") == "special":
+                    if tv_seasons_cache is None:
+                        tv_seasons_cache = await self._get_tv_seasons(tmdb_id)
+                    inferred_season = rules.infer_season_from_tmdb_seasons(
+                        ctx.get("year"),
+                        ctx.get("dir_name") or "",
+                        tv_seasons_cache,
+                        prefer_special=True,
+                    )
+                    if inferred_season is not None:
+                        current_season = inferred_season
             if is_tv and current_season is None:
                 current_season = inferred_season or season
+            season_dir_rename_action: Optional[PlanAction] = None
+            if is_tv and self.action_type == "rename":
+                season_dir_rename_action = self._ensure_season_dir_rename_action(
+                    source_dir_id,
+                    source_dir_name,
+                    ancestors,
+                    dir_id,
+                    current_season,
+                    tmdb_id,
+                    season_dir_rename_cache,
+                )
 
             # 兜底：剧集 group 里某个文件没解析出集数（也没 special label）→ 跳过该文件
             # 避免被错误地塞进剧集 group 后生成无意义新名（甚至导致同名冲突）
@@ -1120,6 +1360,9 @@ class Planner:
                         rename_target_parent = sub_work_ref
                         if sub_work_ref.startswith("ref:"):
                             rename_deps = [sub_work_ref[4:]]
+                elif media_kind == "movie" and promoted_movie_parent:
+                    # 电影文件夹整体移出由 dir relocate 负责；文件仅改名并留在该文件夹内
+                    rename_target_parent = str(dir_id or source_dir_id)
                 action = PlanAction(
                     id=self._next_id(),
                     kind="relocate",
@@ -1134,6 +1377,11 @@ class Planner:
                     metadata={"tmdb_id": tmdb_id, "media_kind": media_kind, "season": current_season, "episode": current_episode, **group_dir_meta},
                 )
                 self._add(action)
+                if season_dir_rename_action:
+                    deps = list(season_dir_rename_action.depends_on or [])
+                    if action.id not in deps:
+                        deps.append(action.id)
+                    season_dir_rename_action.depends_on = deps
                 self._plan_meta_followers(
                     file_item, source_dir_id, new_meta_base, ext, action.id, file_parsed=file_parsed
                 )
@@ -1189,18 +1437,192 @@ class Planner:
             "reason": reason,
         })
 
-    def _ensure_work_dir_action(self, group_key, work_dir_name: str, items: list) -> str:
-        if self.action_type != "move":
-            return ""
-        if not work_dir_name:
-            return ""
-        category_ancestors = self._category_ancestors(group_key, items)
+    def _ensure_season_dir_rename_action(
+        self,
+        source_dir_id,
+        source_dir_name: str,
+        ancestors: list,
+        show_dir_id,
+        season: Optional[int],
+        tmdb_id: str,
+        cache: Dict[str, PlanAction],
+    ) -> Optional[PlanAction]:
+        if season is None:
+            return None
+        src_id = str(source_dir_id or "")
+        if not src_id or not source_dir_name:
+            return None
+        if not (
+            rules.is_season_dir_name(source_dir_name)
+            or rules.is_special_content_dir_name(source_dir_name)
+        ):
+            return None
+        target_name = rules.build_season_folder_name(season, self.season_folder_tpl)
+        if not target_name:
+            return None
+        if src_id in cache:
+            return cache[src_id]
+
+        parent_id = self.scanned_dir_parents.get(src_id)
+        if not parent_id:
+            for idx, (anc_id, _anc_name) in enumerate(ancestors or []):
+                if str(anc_id) == src_id:
+                    parent_id = str(ancestors[idx - 1][0]) if idx > 0 else str(self.parent_id)
+                    break
+        if not parent_id:
+            return None
+        target_parent_id = str(parent_id)
+        flatten_collection = False
+        parent_name = self.scanned_dir_names.get(str(parent_id), "")
+        parent_parent_id = self.scanned_dir_parents.get(str(parent_id))
+        if (
+            show_dir_id
+            and parent_parent_id
+            and str(parent_parent_id) == str(show_dir_id)
+            and rules.is_collection_container_dir(parent_name)
+        ):
+            target_parent_id = str(show_dir_id)
+            flatten_collection = True
+        if rules.is_same_generated_name(source_dir_name, target_name) and not flatten_collection:
+            return None
+        reason_prefix = (
+            f"去除剧集合集层并标准化季目录 | {parent_name}/{source_dir_name} -> {target_name}"
+            if flatten_collection
+            else f"季目录标准化 | {source_dir_name} -> {target_name}"
+        )
+
+        action = PlanAction(
+            id=self._next_id(),
+            kind="relocate",
+            source_id=src_id,
+            source_name=source_dir_name,
+            source_parent_id=str(parent_id),
+            target_parent_id=target_parent_id,
+            target_name=target_name,
+            reason=reason_prefix + (f" | tmdb-{tmdb_id}" if tmdb_id else ""),
+            confidence=0.9 if tmdb_id else 0.6,
+            metadata={
+                "tmdb_id": tmdb_id,
+                "media_kind": "tv",
+                "kind_label": "season_dir_rename",
+                "season": int(season),
+                "flatten_collection_dir": flatten_collection,
+                "collection_dir_id": str(parent_id) if flatten_collection else "",
+            },
+        )
+        self._add(action)
+        cache[src_id] = action
+        return action
+
+    def _category_ancestors_before_tv_show(self, ancestors: list, movie_dir_id) -> list:
+        """独立电影提升时，保留扫描根到剧集目录之间的分类层（如 影音库）。"""
+        if not movie_dir_id or not ancestors:
+            return []
+        movie_idx = next(
+            (idx for idx, (anc_id, _) in enumerate(ancestors) if str(anc_id) == str(movie_dir_id)),
+            None,
+        )
+        if movie_idx is None:
+            return []
+        show_id, _, _ = rules.pick_tv_show_info(
+            ancestors[:movie_idx], {"season": 1, "episode": 1}
+        )
+        if not show_id:
+            return []
+        scan_root = str(self.parent_id)
+        category = []
+        for ancestor_id, ancestor_name in ancestors:
+            if str(ancestor_id) == str(show_id):
+                break
+            if str(ancestor_id) == scan_root:
+                continue
+            category.append((ancestor_id, ancestor_name))
+        return category
+
+    def _build_target_category_parent_ref(self, category_ancestors: list) -> str:
         parent_ref = self.target_root_id or self.parent_id
         for _, cat_name in category_ancestors:
             cat_name = (cat_name or "").strip()
             if not cat_name:
                 continue
             parent_ref = self._ensure_dir_action(parent_ref, cat_name)
+        return parent_ref
+
+    def _resolve_promoted_movie_target_parent(self, ancestors: list, movie_dir_id) -> Optional[str]:
+        """嵌在剧集目录树里的独立电影应提升到的目标父目录。
+
+        move 模式 → target_root + 扫描根到剧集之间的分类层（与剧集目录结构对齐）
+        rename 模式 → 源库中剧集作品目录的同级
+        """
+        nested_parent = rules.get_promoted_movie_parent_id(
+            ancestors,
+            movie_dir_id,
+            self.parent_id,
+            self.scanned_dir_parents,
+        )
+        if not nested_parent:
+            return None
+        if self.action_type == "move":
+            cats = self._category_ancestors_before_tv_show(ancestors, movie_dir_id)
+            return self._build_target_category_parent_ref(cats)
+        return str(nested_parent)
+
+    def _ensure_promoted_movie_move_action(
+        self,
+        dir_id,
+        dir_name: str,
+        target_parent: str,
+        target_name: str,
+        tmdb_id: str,
+        confidence: float,
+    ) -> str:
+        """嵌在剧集目录树里的独立电影：move 模式下整体搬出到目标库中剧集同级目录。"""
+        for action in self.actions:
+            if (
+                action.kind == "move_and_rename_dir"
+                and str(action.source_id) == str(dir_id)
+                and str(action.target_parent_id) == str(target_parent)
+                and action.target_name == target_name
+            ):
+                return f"ref:{action.id}"
+        action = PlanAction(
+            id=self._next_id(),
+            kind="move_and_rename_dir",
+            source_id=str(dir_id),
+            source_name=dir_name or "",
+            target_parent_id=str(target_parent),
+            target_name=target_name,
+            reason=(
+                f"独立电影移出剧集目录 | {dir_name} -> {target_name}"
+                f"{' | tmdb-' + tmdb_id if tmdb_id else ''}"
+            ),
+            confidence=confidence,
+            metadata={
+                "is_work_dir": True,
+                "source_dir_id": str(dir_id),
+                "promoted_from_tv_tree": True,
+                "tmdb_id": tmdb_id,
+            },
+        )
+        self._add(action)
+        return f"ref:{action.id}"
+
+    def _ensure_work_dir_action(
+        self,
+        group_key,
+        work_dir_name: str,
+        items: list,
+        promoted_move_ref: str = "",
+    ) -> str:
+        if self.action_type != "move":
+            return ""
+        if not work_dir_name:
+            return ""
+        if promoted_move_ref:
+            return promoted_move_ref
+        media_kind, group_dir_id, _, _, _, _, _ = group_key
+        category_ancestors = self._category_ancestors(group_key, items)
+        parent_ref = self._build_target_category_parent_ref(category_ancestors)
         ref = self._ensure_dir_action(parent_ref, work_dir_name)
         # 标记为作品目录，并记录对应的源 dir 用于整体移动优化
         src_dir_id = str(group_key[1]) if group_key[1] else ""
@@ -1219,17 +1641,30 @@ class Planner:
         if not items:
             return []
         _, _, _, _, ancestors = items[0]
+        scan_root = str(self.parent_id)
         category_ancestors = []
         for ancestor_id, ancestor_name in ancestors:
             if group_dir_id and str(ancestor_id) == str(group_dir_id):
                 break
+            if str(ancestor_id) == scan_root:
+                continue
             category_ancestors.append((ancestor_id, ancestor_name))
-        return category_ancestors
+        if group_dir_id:
+            return category_ancestors
+        # 散落文件：只保留 generic 分类层（电影/电视剧/动漫），避免在源目录内嵌套目标目录
+        return [
+            (ancestor_id, ancestor_name)
+            for ancestor_id, ancestor_name in category_ancestors
+            if rules.is_generic_media_dir(ancestor_name)
+        ]
 
     def _ensure_dir_action(self, parent_ref: str, folder_name: str) -> str:
+        return self._ensure_dir_action_at(parent_ref, folder_name)
+
+    def _ensure_dir_action_at(self, parent_ref: str, folder_name: str) -> str:
         for action in self.actions:
             if (
-                action.kind == "ensure_dir"
+                action.kind in ("ensure_dir", "move_and_rename_dir")
                 and action.target_parent_id == parent_ref
                 and action.target_name == folder_name
             ):
@@ -1316,18 +1751,22 @@ class Planner:
         if not (title or "").strip():
             return None, [], False, ""
         results = await self._tmdb_search(title, year, group_media_type)
-        selected = rules.pick_tmdb_match_for_year(results, year, group_media_type)
+        selected = rules.pick_tmdb_match_for_year(results, year, group_media_type, query_title=title)
         if selected:
             return selected, results, True, "exact"
         if year:
             results_no_year = await self._tmdb_search(title, None, group_media_type)
-            selected2 = rules.pick_tmdb_match_for_year(results_no_year, year, group_media_type)
+            selected2 = rules.pick_tmdb_match_for_year(results_no_year, year, group_media_type, query_title=title)
             if selected2:
                 return selected2, results_no_year, True, "no_year"
-            if results_no_year:
-                return results_no_year[0], results_no_year, False, "no_year_fallback_first"
-        if results:
-            return results[0], results, False, "fuzzy_first"
+            for hit in results_no_year:
+                _, t, o, _ = rules.extract_tmdb_display_fields(hit, group_media_type)
+                if rules.is_tmdb_title_compatible(title, t, o):
+                    return hit, results_no_year, False, "no_year_fallback_compatible"
+        for hit in results:
+            _, t, o, _ = rules.extract_tmdb_display_fields(hit, group_media_type)
+            if rules.is_tmdb_title_compatible(title, t, o):
+                return hit, results, False, "fuzzy_compatible"
         return None, [], False, "miss"
 
     def _is_low_confidence_group(self, group_key, items: list) -> bool:
@@ -1393,35 +1832,13 @@ class Planner:
 
     @staticmethod
     def _tmdb_titles_share_chars(query: str, *candidates: str) -> bool:
-        """检查 query 跟任一 candidate 是否至少有字符重合（判断字面相关性）。
-
-        - 任一 candidate 包含 query 或反之 → 相关
-        - 中文场景：query 拆 2-gram，至少 1 个 2-gram 出现在 candidate → 相关
-        - 英文场景：query 切单词（≥3 字符），至少 1 个 word 在 candidate 里 → 相关
-        - 单字符 query → 总是相关（无法可靠判断）
-        """
-        q = (query or "").strip().lower()
-        if not q or len(q) <= 1:
-            return True
-        for cand in candidates:
-            c = (cand or "").strip().lower()
-            if not c:
-                continue
-            if q in c or c in q:
-                return True
-            # 中文 2-gram
-            import re as _re
-            cn_chars = _re.sub(r"[^\u4e00-\u9fa5]", "", q)
-            if len(cn_chars) >= 2:
-                bigrams = [cn_chars[i:i + 2] for i in range(len(cn_chars) - 1)]
-                if any(bg in c for bg in bigrams):
-                    return True
-            # 英文 word
-            en_words = [w for w in _re.findall(r"[a-z0-9]{3,}", q)]
-            for w in en_words:
-                if w in c:
-                    return True
-        return False
+        """检查 query 跟 TMDB 命中标题是否字面相关（委托 rules.is_tmdb_title_compatible）。"""
+        cands = [c for c in candidates if (c or "").strip()]
+        if not cands:
+            return False
+        title = cands[0]
+        original = cands[1] if len(cands) > 1 else ""
+        return rules.is_tmdb_title_compatible(query, title, original)
 
     def _find_existing_tmdb_id_in_group(self, items: list) -> str:
         for file_item, _, source_dir_name, _, ancestors in items:
@@ -1475,9 +1892,14 @@ class Planner:
         dir_title = (dir_parsed.get("title") or title or "").strip()
         dir_year = dir_parsed.get("year")
         dir_season = rules.as_first_int(dir_parsed.get("season"))
+        file_parses = [_file_parsed for _file_item, _, _, _file_parsed, _ in items]
+        if group_media_type == "tv":
+            attempts = rules.build_tv_show_match_attempts(title, year, dir_name or "")
+        else:
+            attempts = rules.build_tmdb_match_attempts(title, year, dir_name or "", file_parses)
         file_title_for_year = ""
         file_year_for_year = None
-        for _file_item, _, _, _file_parsed, _ in items:
+        for _file_parsed in file_parses:
             cand_title = (_file_parsed.get("title") or "").strip()
             cand_year = _file_parsed.get("year")
             if cand_year and (cand_title or title):
@@ -1486,23 +1908,27 @@ class Planner:
                 break
 
         selected: Optional[dict] = None
-        chosen_title = title
-        chosen_year = year
+        chosen_title = attempts[0][0] if attempts else title
+        chosen_year = attempts[0][1] if attempts else year
         inferred_season: Optional[int] = None
 
         # 多版本歧义检测：group 完全没年份信息 + TMDB 同名作品有多个不同年份版本
         # → 返回歧义标记，由调用方跳过整组并提示用户补年份
-        effective_year = year or dir_year or file_year_for_year
+        if group_media_type == "tv":
+            effective_year = chosen_year or year or dir_year
+        else:
+            effective_year = chosen_year or year or dir_year or file_year_for_year
+        ambiguity_title = chosen_title or title
         if not effective_year and not self._find_existing_tmdb_id_in_group(items):
             try:
-                preview_results = await self._tmdb_search(title, None, group_media_type)
-                ambiguity = self._detect_multi_version_ambiguity(preview_results, title, group_media_type)
+                preview_results = await self._tmdb_search(ambiguity_title, None, group_media_type)
+                ambiguity = self._detect_multi_version_ambiguity(preview_results, ambiguity_title, group_media_type)
                 if ambiguity:
                     versions = []
                     for hit in ambiguity[:5]:
                         _, ht, _, hy = rules.extract_tmdb_display_fields(hit, group_media_type)
                         versions.append(f"{ht} ({hy})" if hy else ht)
-                    self.log(f"[计划] TMDB「{title}」存在多个版本：{', '.join(versions)}，缺少年份无法精确匹配")
+                    self.log(f"[计划] TMDB「{ambiguity_title}」存在多个版本：{', '.join(versions)}，缺少年份无法精确匹配")
                     return {
                         "ambiguous": True,
                         "candidates": [
@@ -1512,15 +1938,11 @@ class Planner:
                         ],
                     }
             except Exception as e:
-                self.log(f"[计划] TMDB 歧义检测异常 {title}: {e}")
+                self.log(f"[计划] TMDB 歧义检测异常 {ambiguity_title}: {e}")
 
         try:
-            attempts = []
-            if dir_year and file_year_for_year and dir_year != file_year_for_year:
-                attempts.append((dir_title or title, dir_year, "目录"))
-                attempts.append((file_title_for_year or dir_title or title, file_year_for_year, "文件"))
-            else:
-                attempts.append((title, year, "默认"))
+            if not attempts:
+                attempts = [(title, year, "默认")]
 
             for cand_title, cand_year, cand_source in attempts:
                 if selected:
@@ -1589,10 +2011,15 @@ class Planner:
 
         tmdb_id, tmdb_title, tmdb_original, tmdb_year = rules.extract_tmdb_display_fields(selected, group_media_type)
         # 用于置信度计算的"用户声明年份"：group / 目录 / 文件 任一来源都算
-        declared_year = chosen_year or year or dir_year or file_year_for_year
-        if declared_year and tmdb_year and abs(int(declared_year) - int(tmdb_year)) <= 1:
+        if group_media_type == "tv":
+            declared_year = chosen_year or year or dir_year
+            display_year = rules.resolve_tmdb_tv_series_year(selected, None) or tmdb_year
+        else:
+            declared_year = chosen_year or year or dir_year or file_year_for_year
+            display_year = chosen_year or tmdb_year
+        if declared_year and display_year and abs(int(declared_year) - int(display_year)) <= 1:
             confidence = 0.9  # 标题 + 年份精确匹配
-        elif tmdb_year:
+        elif display_year:
             confidence = 0.65  # 标题命中但用户没声明年份，TMDB 给出唯一/最佳候选
         else:
             confidence = 0.5
@@ -1601,13 +2028,24 @@ class Planner:
             "tmdb_title": tmdb_title,
             "tmdb_original": tmdb_original,
             "title": chosen_title,
-            "year": chosen_year or tmdb_year,
+            "year": display_year if group_media_type == "tv" else (chosen_year or tmdb_year),
             "raw": selected,
             "confidence": confidence,
         }
         if inferred_season or dir_season:
             out["inferred_season"] = inferred_season or dir_season
         return out
+
+    async def _get_tv_seasons(self, tmdb_id: str) -> list:
+        key = str(tmdb_id)
+        if key in self._tv_seasons_cache:
+            return self._tv_seasons_cache[key]
+        seasons = await fetch_tv_seasons_async(
+            tmdb_id, self.tmdb_lang, self.tmdb_api_key, self.tmdb_proxy
+        )
+        await asyncio.sleep(self.tmdb_interval)
+        self._tv_seasons_cache[key] = seasons
+        return seasons
 
     async def _batch_ffprobe(self, items: list) -> Dict[str, dict]:
         if not items or not self.use_ffprobe:

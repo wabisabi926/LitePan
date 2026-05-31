@@ -161,14 +161,76 @@ def is_same_generated_name(current_name: str, generated_name: str) -> bool:
     return (current_name or "").strip() == (generated_name or "").strip()
 
 
-def is_season_dir_name(name: str) -> bool:
-    value = (name or "").strip().lower()
-    return bool(
-        re.search(r'^(season|series)\s*\d{1,3}$', value)
-        or re.search(r'^s\d{1,3}$', value)
-        or re.search(r'^第\s*\d{1,3}\s*季$', value)
-        or re.search(r'^第[一二三四五六七八九十百]+季$', value)
+def parse_season_dir_number(name: str) -> Optional[int]:
+    """从 Season 00 / S01 / 第1季 (2016) 4K 等季目录名解析季号；0 表示特别篇。"""
+    raw = (name or "").strip()
+    if not raw:
+        return None
+    patterns = (
+        (r"^(?:season|series)\s*(\d{1,3})\b", lambda m: int(m.group(1))),
+        (r"^s(\d{1,3})\b", lambda m: int(m.group(1))),
+        (r"^第\s*(\d{1,3})\s*季", lambda m: int(m.group(1))),
+        (r"^第([零〇一二两三四五六七八九十百]+)季", lambda m: chinese_number_to_int(m.group(1))),
     )
+    for pattern, extractor in patterns:
+        m = re.match(pattern, raw, flags=re.IGNORECASE)
+        if not m:
+            continue
+        try:
+            num = extractor(m)
+        except (TypeError, ValueError):
+            num = None
+        if num is not None:
+            return num
+    return None
+
+
+def is_season_dir_name(name: str) -> bool:
+    return parse_season_dir_number(name) is not None
+
+
+_COLLECTION_CONTAINER_HINT_RE = re.compile(
+    r"(?:"
+    r"\+|＋|/|"
+    r"(?:前?第?[一二三四五六七八九十\d]+季[与和]|"
+    r"[与和]前?第?[一二三四五六七八九十\d]+季|"
+    r"季[与和][前第]?[一二三四五六七八九十\d]+)"
+    r"|打包|合集|全集|全季|各季|"
+    r"前几季|前五季|前\d+季|"
+    r"番外.*剧场|剧场.*番外|番外\+|\+番外|"
+    r"季\+|\+季|多季|"
+    r"seasons?\s*[\+\&]|extras?\s*[\+\&]"
+    r")",
+    re.IGNORECASE,
+)
+
+# 明显是「多季/多碟打包」而不是单片 release 时才继续判为合集容器
+_COLLECTION_CONTAINER_STRONG_HINT_RE = re.compile(
+    r"(?:"
+    r"\+|＋|/|"
+    r"(?:前?第?[一二三四五六七八九十\d]+季[与和]|"
+    r"[与和]前?第?[一二三四五六七八九十\d]+季|"
+    r"季[与和][前第]?[一二三四五六七八九十\d]+)"
+    r"|打包|合集|全集|全季|各季|"
+    r"前几季|前五季|前\d+季|"
+    r"番外.*剧场|剧场.*番外|番外\+|\+番外|"
+    r"季\+|\+季|多季|"
+    r"seasons?\s*[\+\&]|extras?\s*[\+\&]"
+    r")",
+    re.IGNORECASE,
+)
+
+_SPECIAL_CONTENT_DIR_RE = re.compile(
+    r"(?:^|[\s._\-（(【\[])"
+    r"(?:番外篇?|特别篇|特別篇|前传|后传|外传|OVA|OAD|SP|Side Story|Specials?)"
+    r"(?:[\s._\-）)】\]\']|$)",
+    re.IGNORECASE,
+)
+
+_STANDALONE_MOVIE_DIR_HINT_RE = re.compile(
+    r"(?:剧场版|映画|电影版|大电影|院线版|Movie\s*Edition)",
+    re.IGNORECASE,
+)
 
 
 def is_generic_media_dir(name: str) -> bool:
@@ -428,6 +490,7 @@ def parse_dir_name(name: str) -> dict:
             break
     # 剥掉已有的 {tmdb-XXX} / [imdb-ttXXX] 等元数据标签，防止 guessit 误把 (YYYY) {tmdb-NNN} 当 SYYYY EpNNN
     raw = strip_known_id_tags(raw).strip()
+    raw = strip_release_site_prefix(raw)
 
     def _clean(out: dict) -> dict:
         if out.get("title"):
@@ -450,11 +513,26 @@ def parse_dir_name(name: str) -> dict:
             out["type"] = "episode"
         return _clean(out)
 
+    m = re.search(
+        r'^\s*(.+?)\s*[\(（]\s*(\d{4})\s*[\)）]\s*'
+        r'(?:4k|8k|2160p|1080p|720p|480p|uhd|hdr|dv)?\s*$',
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        head, season = strip_season_suffix(m.group(1).strip())
+        out = {"title": head, "year": int(m.group(2)), "type": "movie"}
+        if season is not None:
+            out["season"] = season
+            out["type"] = "episode"
+        return _clean(out)
+
     head, season = strip_season_suffix(raw)
     if season is not None and head:
         return _clean({"title": head, "season": season, "type": "episode"})
 
-    result = parse_filename_with_guessit(raw)
+    guessit_name = preprocess_dotted_filename(raw) if raw.count(".") >= 2 else raw
+    result = parse_filename_with_guessit(guessit_name)
     if result.get("title"):
         return _clean(result)
 
@@ -475,8 +553,243 @@ def parse_dir_name(name: str) -> dict:
 def looks_like_work_dir_name(name: str) -> bool:
     if is_generic_media_dir(name) or is_season_dir_name(name):
         return False
+    if is_collection_container_dir(name):
+        return False
     parsed = normalize_parsed_media(parse_dir_name(name))
     return bool(parsed.get("title"))
+
+
+def is_collection_container_dir(name: str, child_dir_names: Optional[List[str]] = None) -> bool:
+    """描述性集合层（如「前五季+番外+剧场版」），不是 TMDB 作品名。"""
+    raw = (name or "").strip()
+    if not raw:
+        return False
+    if looks_like_scene_movie_release(raw):
+        return False
+    parsed = normalize_parsed_media(parse_dir_name(raw))
+    title = (parsed.get("title") or "").strip()
+    if title and score_title_for_tmdb(title) >= 0.45:
+        if not _COLLECTION_CONTAINER_STRONG_HINT_RE.search(raw):
+            return False
+    if _COLLECTION_CONTAINER_HINT_RE.search(raw):
+        return True
+    if child_dir_names:
+        season_count = sum(1 for child in child_dir_names if is_season_dir_name(child))
+        if season_count >= 2:
+            return True
+    parsed = normalize_parsed_media(parse_dir_name(raw))
+    title = (parsed.get("title") or "").strip()
+    if re.fullmatch(r"前?[一二三四五六七八九十\d]+季", title):
+        return True
+    return False
+
+
+def is_special_content_dir_name(name: str) -> bool:
+    """番外/特别篇等目录：属于剧集，但不是独立 TMDB 作品。"""
+    if is_season_dir_name(name):
+        return False
+    return bool(_SPECIAL_CONTENT_DIR_RE.search(name or ""))
+
+
+def has_special_content_ancestor(ancestors: list) -> bool:
+    return any(is_special_content_dir_name(name) for _, name in (ancestors or []))
+
+
+def looks_like_standalone_movie_dir(name: str) -> bool:
+    """剧集目录树中的独立电影文件夹（如「锈铁重现 (2024) 4K」）。"""
+    raw = (name or "").strip()
+    if not raw:
+        return False
+    if (
+        is_generic_media_dir(raw)
+        or is_season_dir_name(raw)
+        or is_collection_container_dir(raw)
+        or is_special_content_dir_name(raw)
+    ):
+        return False
+    parsed = normalize_parsed_media(parse_dir_name(raw))
+    title = (parsed.get("title") or "").strip()
+    year = parsed.get("year")
+    if not title or not year:
+        return False
+    if re.fullmatch(r"第\s*\d{1,3}\s*季", title, flags=re.IGNORECASE):
+        return False
+    if _STANDALONE_MOVIE_DIR_HINT_RE.search(raw):
+        return True
+    if score_title_for_tmdb(title) >= 0.45:
+        return True
+    return False
+
+
+def find_nearest_standalone_movie_dir(ancestors: list) -> Tuple[Optional[Any], Optional[str]]:
+    """只在已经进入剧集作品目录之后，识别嵌套的独立电影目录。
+
+    例如 `一人之下/前五季+番外+剧场版/锈铁重现（2024）4K` 可以被提升为电影；
+    但 `电视剧/暗河传 (2025)` 本身是剧集作品目录，不能因为带年份就被强制当电影。
+    """
+    for idx in range(len(ancestors or []) - 1, -1, -1):
+        dir_id, dir_name = ancestors[idx]
+        if looks_like_standalone_movie_dir(dir_name):
+            show_id, _, _ = pick_tv_show_info(ancestors[:idx], {"season": 1, "episode": 1})
+            if show_id:
+                return dir_id, dir_name
+    return None, None
+
+
+def get_promoted_movie_parent_id(
+    ancestors: list,
+    movie_dir_id: Any,
+    scan_parent_id: str,
+    scanned_dir_parents: Dict[str, str],
+) -> Optional[str]:
+    """嵌在剧集目录树里的独立电影：提升到剧集作品目录的同级（库根下）。"""
+    if not movie_dir_id or not ancestors:
+        return None
+    movie_idx = next(
+        (idx for idx, (anc_id, _) in enumerate(ancestors) if str(anc_id) == str(movie_dir_id)),
+        None,
+    )
+    if movie_idx is None:
+        return None
+    show_id, _, _ = pick_tv_show_info(ancestors[:movie_idx], {"season": 1, "episode": 1})
+    if not show_id:
+        return None
+    show_parent = scanned_dir_parents.get(str(show_id))
+    if show_parent:
+        return str(show_parent)
+    return str(scan_parent_id or "")
+
+
+def get_nearest_tv_dir_context(ancestors: list) -> Dict[str, Any]:
+    """返回最近的季目录或番外/特别篇目录上下文。"""
+    for _, dir_name in reversed(ancestors or []):
+        if is_season_dir_name(dir_name):
+            parsed = normalize_parsed_media(parse_dir_name(dir_name))
+            season = parse_season_dir_number(dir_name)
+            return {
+                "kind": "season",
+                "dir_name": dir_name,
+                "season": season,
+                "year": parsed.get("year"),
+            }
+        if is_special_content_dir_name(dir_name):
+            parsed = normalize_parsed_media(parse_dir_name(dir_name))
+            return {
+                "kind": "special",
+                "dir_name": dir_name,
+                "title": parsed.get("title"),
+                "year": parsed.get("year"),
+            }
+    return {}
+
+
+def infer_season_from_tmdb_seasons(
+    dir_year: Optional[int],
+    dir_name: str,
+    tmdb_seasons: List[dict],
+    *,
+    prefer_special: bool = False,
+) -> Optional[int]:
+    """用 TMDB 季列表 + 目录年份/语义对齐季号（番外需命中 S00，不能硬映射）。"""
+    if not tmdb_seasons:
+        return None
+    name = dir_name or ""
+    looks_special = prefer_special or is_special_content_dir_name(name)
+    best_score = -1
+    best_season: Optional[int] = None
+    for item in tmdb_seasons:
+        season_num = item.get("season_number")
+        if season_num is None:
+            continue
+        try:
+            season_num = int(season_num)
+        except (TypeError, ValueError):
+            continue
+        air_date = str(item.get("air_date") or "")
+        season_year = int(air_date[:4]) if len(air_date) >= 4 and air_date[:4].isdigit() else None
+        score = 0
+        if dir_year and season_year and dir_year == season_year:
+            score += 10
+        elif dir_year and season_year and abs(dir_year - season_year) <= 1:
+            score += 4
+        if looks_special and season_num == 0:
+            score += 8
+        elif not looks_special and season_num > 0:
+            score += 1
+        if score > best_score:
+            best_score = score
+            best_season = season_num
+    if best_score < 8:
+        return None
+    return best_season
+
+
+def _apply_physical_season_from_ancestors(file_parsed: dict, ancestors: list) -> bool:
+    for _, anc_name in reversed(ancestors or []):
+        if is_season_dir_name(anc_name):
+            dir_season = parse_season_dir_number(anc_name)
+            if dir_season is not None:
+                file_parsed["season"] = dir_season
+                return True
+    return False
+
+
+def _prepare_tv_file_parsed(file_parsed: dict, ancestors: list) -> dict:
+    out = dict(file_parsed or {})
+    physical = _apply_physical_season_from_ancestors(out, ancestors)
+    if not physical and has_special_content_ancestor(ancestors):
+        if out.get("episode") is not None and out.get("season") == 1:
+            out.pop("season", None)
+    return out
+
+
+def analyze_tv_tree_layout(entries: List[Tuple[Any, list]]) -> Dict[str, dict]:
+    """扫描批次内各作品目录下的季结构，供根目录散落检测使用。"""
+    layout: Dict[str, dict] = {}
+    for _file_item, ancestors in entries or []:
+        fp = _prepare_tv_file_parsed(
+            normalize_parsed_media(parse_filename_strict(_file_item.name)),
+            ancestors,
+        )
+        if not looks_like_tv_file(fp, ancestors).matched:
+            continue
+        show_dir_id, show_dir_name, _show_parsed = pick_tv_show_info(ancestors, fp)
+        if not show_dir_id:
+            continue
+        key = str(show_dir_id)
+        if key not in layout:
+            layout[key] = {
+                "show_dir_id": show_dir_id,
+                "show_dir_name": show_dir_name,
+                "season_numbers": set(),
+            }
+        for _, anc_name in ancestors:
+            if is_season_dir_name(anc_name):
+                sn = parse_season_dir_number(anc_name)
+                if sn is not None:
+                    layout[key]["season_numbers"].add(sn)
+    for info in layout.values():
+        positive = {sn for sn in info["season_numbers"] if sn > 0}
+        info["has_multi_season"] = len(positive) >= 2
+    return layout
+
+
+def is_ambiguous_root_tv_scatter(ancestors: list, layout: Dict[str, dict], show_dir_id: Any) -> bool:
+    """作品根目录散落文件 + 子树已存在多季 → 无法确定季号。"""
+    if not ancestors or show_dir_id is None:
+        return False
+    show_idx = next(
+        (idx for idx, (anc_id, _) in enumerate(ancestors) if str(anc_id) == str(show_dir_id)),
+        None,
+    )
+    if show_idx is None:
+        return False
+    if ancestors[show_idx + 1:]:
+        return False
+    info = layout.get(str(show_dir_id))
+    if not info:
+        return False
+    return bool(info.get("has_multi_season"))
 
 
 def looks_like_tv_file(parsed: dict, ancestors: list) -> RuleResult:
@@ -485,30 +798,76 @@ def looks_like_tv_file(parsed: dict, ancestors: list) -> RuleResult:
     if parsed.get("season") is not None and parsed.get("episode") is not None:
         reasons.append("文件名匹配 S/E 模式")
         score += 0.7
+    elif parsed.get("episode") is not None and has_special_content_ancestor(ancestors):
+        reasons.append("文件名含集数且位于番外/特别篇目录")
+        score += 0.7
     season_anc = next((name for _, name in ancestors if is_season_dir_name(name)), None)
     if season_anc:
         reasons.append(f"祖先目录是季目录: {season_anc!r}")
+        score += 0.5
+    special_anc = next((name for _, name in ancestors if is_special_content_dir_name(name)), None)
+    if special_anc:
+        reasons.append(f"祖先目录是番外/特别篇: {special_anc!r}")
         score += 0.5
     if score >= 0.5:
         return RuleResult(True, min(score, 1.0), reasons)
     return RuleResult(False, score, reasons)
 
 
+def resolve_tv_group_year(show_parsed: dict) -> Optional[int]:
+    """剧集 group 的作品年份只来自作品目录，不用文件名/集标题里的季播年份。"""
+    return (show_parsed or {}).get("year")
+
+
+def build_tv_show_match_attempts(
+    group_title: str,
+    group_year: Optional[int],
+    dir_name: str,
+) -> List[Tuple[str, Optional[int], str]]:
+    """剧集 TMDB 查询：只用作品目录 title/year，不用文件名里的季播年份。"""
+    dir_parsed = normalize_parsed_media(parse_dir_name(dir_name)) if dir_name else {}
+    dir_title = (dir_parsed.get("title") or group_title or "").strip()
+    search_year = group_year if group_year is not None else dir_parsed.get("year")
+    merged_title = pick_best_title_for_tmdb(dir_title, group_title)
+
+    attempts: List[Tuple[str, Optional[int], str]] = []
+    seen = set()
+
+    def _add(title: str, year: Optional[int], source: str) -> None:
+        t = (title or "").strip()
+        if not t:
+            return
+        key = (t.casefold(), year)
+        if key in seen:
+            return
+        seen.add(key)
+        attempts.append((t, year, source))
+
+    _add(merged_title, search_year, "作品")
+    if dir_title and score_title_for_tmdb(dir_title) >= 0.45:
+        _add(dir_title, search_year, "目录")
+    for title, year, source in list(attempts):
+        cn_core = extract_chinese_title_core(title)
+        if cn_core and cn_core != title:
+            _add(cn_core, year, f"{source}-中文")
+    return attempts
+
+
 def pick_tv_show_info(ancestors: list, file_parsed: dict) -> Tuple[Optional[str], Optional[str], dict]:
-    deepest_dir_id = ancestors[-1][0] if ancestors else None
-    skip_deepest_as_season_container = False
-    if deepest_dir_id and file_parsed.get("season") is not None and file_parsed.get("episode") is not None:
-        for _, upper_name in ancestors[:-1]:
-            if is_generic_media_dir(upper_name) or is_season_dir_name(upper_name):
+    for idx in range(len(ancestors or []) - 1, -1, -1):
+        dir_id, dir_name = ancestors[idx]
+        if is_generic_media_dir(dir_name):
+            continue
+        if is_season_dir_name(dir_name):
+            continue
+        if is_collection_container_dir(dir_name):
+            continue
+        if is_special_content_dir_name(dir_name):
+            continue
+        if looks_like_standalone_movie_dir(dir_name):
+            show_id, _, _ = pick_tv_show_info(ancestors[:idx], {"season": 1, "episode": 1})
+            if show_id:
                 continue
-            if normalize_parsed_media(parse_dir_name(upper_name)).get("title"):
-                skip_deepest_as_season_container = True
-                break
-    for dir_id, dir_name in reversed(ancestors):
-        if skip_deepest_as_season_container and str(dir_id) == str(deepest_dir_id):
-            continue
-        if is_season_dir_name(dir_name) or is_generic_media_dir(dir_name):
-            continue
         parsed = normalize_parsed_media(parse_dir_name(dir_name))
         if parsed.get("title"):
             return dir_id, dir_name, parsed
@@ -520,24 +879,6 @@ def pick_tv_show_info(ancestors: list, file_parsed: dict) -> Tuple[Optional[str]
         "episode": file_parsed.get("episode"),
         "type": "episode",
     }
-
-
-def parse_season_dir_number(name: str) -> Optional[int]:
-    """从 Season 00 / S01 / 第1季 等季目录名解析季号；0 表示特别篇。"""
-    value = (name or "").strip().lower()
-    m = re.search(r'^(?:season|series)\s*(\d{1,3})$', value)
-    if m:
-        return int(m.group(1))
-    m = re.search(r'^s(\d{1,3})$', value)
-    if m:
-        return int(m.group(1))
-    m = re.search(r'^第\s*(\d{1,3})\s*季$', value)
-    if m:
-        return int(m.group(1))
-    m = re.search(r'^第([零〇一二两三四五六七八九十百]+)季$', value)
-    if m:
-        return chinese_number_to_int(m.group(1))
-    return None
 
 
 def build_season_folder_name(season: Optional[int], template: str = "") -> str:
@@ -766,6 +1107,31 @@ def audio_channels_label(channels) -> Optional[str]:
     }.get(channels, str(channels) if channels > 0 else None)
 
 
+def resolve_tmdb_tv_series_year(show_info: dict, seasons: Optional[List[dict]] = None) -> Optional[int]:
+    """剧集作品年份：优先 Season 1 播出年，避免 TMDB first_air_date 被最近一季覆盖。"""
+    if seasons:
+        for item in seasons:
+            if item.get("season_number") == 1:
+                air = str(item.get("air_date") or "")
+                if len(air) >= 4 and air[:4].isdigit():
+                    return int(air[:4])
+        positive_years: List[int] = []
+        for item in seasons:
+            sn = item.get("season_number")
+            if sn is None or int(sn) <= 0:
+                continue
+            air = str(item.get("air_date") or "")
+            if len(air) >= 4 and air[:4].isdigit():
+                positive_years.append(int(air[:4]))
+        if positive_years:
+            return min(positive_years)
+    if show_info:
+        fad = str(show_info.get("first_air_date") or "")
+        if len(fad) >= 4 and fad[:4].isdigit():
+            return int(fad[:4])
+    return None
+
+
 def extract_tmdb_display_fields(result: dict, media_type: str = "movie") -> tuple:
     if not result:
         return "", "", "", None
@@ -777,16 +1143,100 @@ def extract_tmdb_display_fields(result: dict, media_type: str = "movie") -> tupl
     return tmdb_id, title, original, result_year
 
 
-def pick_tmdb_match_for_year(results: list, expected_year: Optional[int], media_type: str) -> Optional[dict]:
+def is_tmdb_title_compatible(query: str, result_title: str, result_original: str = "") -> bool:
+    """判断 TMDB 命中是否与查询标题字面相关。
+
+    典型误配：「千与千寻」被 TMDB 第一条结果「千与千寻诞生秘话」吸走。
+    """
+    q = (query or "").strip()
+    if not q:
+        return False
+    ql = q.casefold()
+    title = (result_title or "").strip()
+    original = (result_original or "").strip()
+    candidates = [title, original]
+    for t in candidates:
+        if t and ql == t.casefold():
+            return True
+
+    en_words = [w for w in re.findall(r"[a-z0-9]{3,}", ql)]
+    if en_words:
+        blob = " ".join(c.casefold() for c in candidates if c)
+        if any(w in blob for w in en_words):
+            return True
+
+    cn_q = re.sub(r"[^\u4e00-\u9fa5]", "", q)
+    if len(cn_q) >= 2:
+        for t in candidates:
+            cn_t = re.sub(r"[^\u4e00-\u9fa5]", "", t)
+            if not cn_t:
+                continue
+            if cn_q == cn_t:
+                return True
+            if cn_t.startswith(cn_q) and len(cn_t) > len(cn_q):
+                extra = cn_t[len(cn_q):]
+                if re.search(r"[\u4e00-\u9fa5]", extra):
+                    return False
+            if cn_t.endswith(cn_q) and len(cn_t) > len(cn_q):
+                prefix = cn_t[:-len(cn_q)]
+                if prefix and re.search(r"(舞台剧|纪录片|歌剧|幕后|制作纪录)", prefix):
+                    return False
+            if cn_q in cn_t:
+                return True
+        # 短中文片名不能靠单个 2-gram 命中，否则「暗河传」会误中
+        # 「超银河传说外传...」（共享“河传”）。
+        if len(cn_q) <= 4:
+            return False
+        bigrams = [cn_q[i:i + 2] for i in range(len(cn_q) - 1)]
+        for t in candidates:
+            cn_t = re.sub(r"[^\u4e00-\u9fa5]", "", t)
+            if not cn_t or cn_t == cn_q:
+                continue
+            if cn_t.startswith(cn_q) and len(cn_t) > len(cn_q):
+                continue
+            hits = sum(1 for bg in bigrams if bg in cn_t)
+            if hits >= max(2, len(bigrams) // 2):
+                return True
+        return False
+
+    if len(ql) <= 1:
+        return True
+    for t in candidates:
+        tl = t.casefold()
+        if tl and (ql in tl or tl in ql):
+            return True
+    return False
+
+
+def pick_tmdb_match_for_year(
+    results: list,
+    expected_year: Optional[int],
+    media_type: str,
+    query_title: Optional[str] = None,
+) -> Optional[dict]:
     if not results:
         return None
-    if not expected_year:
-        return results[0]
-    for item in results:
-        _, _, _, result_year = extract_tmdb_display_fields(item, media_type)
-        if result_year and abs(result_year - expected_year) <= 1:
-            return item
-    return None
+    qt = (query_title or "").strip()
+
+    def _compatible(item: dict) -> bool:
+        if not qt:
+            return True
+        _, t, o, _ = extract_tmdb_display_fields(item, media_type)
+        return is_tmdb_title_compatible(qt, t, o)
+
+    if expected_year:
+        for item in results:
+            _, _, _, result_year = extract_tmdb_display_fields(item, media_type)
+            if result_year and abs(result_year - expected_year) <= 1 and _compatible(item):
+                return item
+        return None
+
+    if qt:
+        for item in results:
+            if _compatible(item):
+                return item
+        return None
+    return results[0]
 
 
 def build_folder_name(parsed: dict, tmdb_id: str = "") -> str:
@@ -1082,9 +1532,169 @@ def strip_release_group_from_title(title: str) -> str:
     return raw
 
 
+RELEASE_SITE_LEADING_BRACKET_RE = re.compile(
+    r"^\s*[【\[][^】\]]*(?:"
+    r"发布|www\.|https?://|"
+    r"(?:\.com|\.net|\.org|\.cc|\.tv|\.me|\.io)\b|"
+    r"影视之家|高清影视|资源网|论坛|社区|家园|站点|网站"
+    r")[^】\]]*[】\]]\s*",
+    re.IGNORECASE,
+)
+
+_SCENE_MOVIE_RELEASE_RE = re.compile(
+    r"(?:"
+    r"\.(?:19|20)\d{2}\.(?:2160|1080|720|480)p"
+    r"|(?:2160|1080|720|480)p[\s._\-]*(?:WEB[- ]?DL|BluRay|REMUX|HDTV|WEBRip)"
+    r"|WEB[- ]?DL[\s._\-]*H\.?26[45]"
+    r"|(?:H\.?265|HEVC|x265)[\s._\-]*(?:HDR|HQ|DTS)"
+    r"|60fps|DTS\d|高码"
+    r")",
+    re.IGNORECASE,
+)
+
+_TITLE_NOISE_RE = re.compile(
+    r"www\.|https?://|(?:\.com|\.net|\.org|\.cc|\.tv|\.me|\.io)\b|发布|影视之家|资源网|论坛|社区",
+    re.IGNORECASE,
+)
+
+
+def strip_release_site_prefix(name: str) -> str:
+    """剥掉目录/文件名开头明显的发布站前缀，如【高清影视之家发布 www.xxx.com】。"""
+    raw = (name or "").strip()
+    if not raw:
+        return raw
+    prev = None
+    while prev != raw:
+        prev = raw
+        raw = RELEASE_SITE_LEADING_BRACKET_RE.sub("", raw, count=1).strip()
+    return raw
+
+
+def looks_like_scene_movie_release(name: str) -> bool:
+    """国内 PT/WEB 电影资源包常见命名特征，不应走番剧解析。"""
+    return bool(_SCENE_MOVIE_RELEASE_RE.search(name or ""))
+
+
+def score_title_for_tmdb(title: str) -> float:
+    """评估 title 是否像真实片名（越高越可信）。"""
+    raw = (title or "").strip()
+    if not raw:
+        return 0.0
+    score = 1.0
+    if _TITLE_NOISE_RE.search(raw):
+        score -= 0.85
+    if re.search(r"\d{3,4}p", raw, re.IGNORECASE):
+        score -= 0.35
+    if re.search(r"\b(?:WEB[- ]?DL|BluRay|REMUX|HDTV|HEVC|x265|DTS)\b", raw, re.IGNORECASE):
+        score -= 0.25
+    token_count = len(re.split(r"[\s._\-]+", raw))
+    if token_count > 10:
+        score -= 0.25
+    elif token_count > 7:
+        score -= 0.15
+    if len(raw) > 48:
+        score -= 0.1
+    if re.fullmatch(r"[\u4e00-\u9fa5]{2,16}", raw):
+        score += 0.2
+    return max(0.0, min(1.0, score))
+
+
+def extract_chinese_title_core(title: str) -> str:
+    raw = (title or "").strip()
+    m = re.match(r"^([\u4e00-\u9fa5]+(?:[·・][\u4e00-\u9fa5]+)*)", raw)
+    return m.group(1) if m else ""
+
+
+def pick_best_title_for_tmdb(*candidates: str) -> str:
+    cleaned = [(c or "").strip() for c in candidates if (c or "").strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    scored = sorted(((score_title_for_tmdb(title), title) for title in cleaned), reverse=True)
+    best_score, best_title = scored[0]
+    if best_score >= 0.45:
+        return best_title
+    for score, title in scored:
+        if score >= 0.35:
+            return title
+    return cleaned[0]
+
+
+def resolve_movie_group_identity(dir_name: str, file_parsed: dict) -> Tuple[str, Optional[int]]:
+    """合并目录名 + 文件名，得到用于分组/TMDB 的 title/year。"""
+    dir_parsed = normalize_parsed_media(parse_dir_name(dir_name)) if dir_name else {}
+    file_parsed = normalize_parsed_media(file_parsed or {})
+    dir_title = (dir_parsed.get("title") or "").strip()
+    dir_year = dir_parsed.get("year")
+    file_title = (file_parsed.get("title") or "").strip()
+    file_year = file_parsed.get("year")
+    title = pick_best_title_for_tmdb(dir_title, file_title)
+    year = dir_year or file_year
+    return title, year
+
+
+def build_tmdb_match_attempts(
+    group_title: str,
+    group_year: Optional[int],
+    dir_name: str,
+    file_parses: List[dict],
+) -> List[Tuple[str, Optional[int], str]]:
+    """目录 + 文件名组合生成 TMDB 查询候选，按优先级排序。"""
+    dir_parsed = normalize_parsed_media(parse_dir_name(dir_name)) if dir_name else {}
+    dir_title = (dir_parsed.get("title") or "").strip()
+    dir_year = dir_parsed.get("year")
+
+    file_titles: List[str] = []
+    file_years: List[int] = []
+    for parsed in file_parses or []:
+        fp = normalize_parsed_media(parsed or {})
+        ft = (fp.get("title") or "").strip()
+        fy = fp.get("year")
+        if ft:
+            file_titles.append(ft)
+        if fy is not None:
+            file_years.append(int(fy))
+
+    file_title = pick_best_title_for_tmdb(*file_titles) if file_titles else ""
+    file_year = file_years[0] if file_years else None
+    merged_title = pick_best_title_for_tmdb(dir_title, file_title, group_title)
+    merged_year = dir_year or file_year or group_year
+
+    attempts: List[Tuple[str, Optional[int], str]] = []
+    seen = set()
+
+    def _add(title: str, year: Optional[int], source: str) -> None:
+        t = (title or "").strip()
+        if not t:
+            return
+        key = (t.casefold(), year)
+        if key in seen:
+            return
+        seen.add(key)
+        attempts.append((t, year, source))
+
+    _add(merged_title, merged_year, "合并")
+    if file_title:
+        _add(file_title, file_year or merged_year, "文件")
+    if dir_title and score_title_for_tmdb(dir_title) >= 0.45:
+        _add(dir_title, dir_year or merged_year, "目录")
+    if group_title:
+        _add(group_title, group_year, "默认")
+
+    for title, year, source in list(attempts):
+        cn_core = extract_chinese_title_core(title)
+        if cn_core and cn_core != title:
+            _add(cn_core, year, f"{source}-中文")
+
+    return attempts
+
+
 def is_anime(name: str) -> bool:
     raw = (name or "")
     if not raw:
+        return False
+    if looks_like_scene_movie_release(raw):
         return False
     if re.search(r"[\s._\-\[]S\d{1,2}E\d{1,4}(?![\dA-Za-z])", raw, re.IGNORECASE):
         return False
@@ -1335,5 +1945,3 @@ def extract_special_label(name: str) -> Optional[str]:
         except ValueError:
             return f"{kind}{num}"
     return kind
-
-
