@@ -1,6 +1,7 @@
 """管理员 API：账号 CRUD、缓存、认证调度、系统配置。"""
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from typing import Dict, Any
 from datetime import datetime, UTC
 import time
@@ -15,6 +16,7 @@ from api.responses import error_response as _error_response, success_response as
 from core.account_utils import filter_runtime_config as _filter_driver_config, get_account_or_404
 from core.driver_service import get_account_driver_instance
 from core.security import generate_password_hash, assess_admin_credential_state
+from core.session_manager import session_manager
 router = APIRouter()
 
 def _mask_sensitive_value(value: Any) -> str:
@@ -1348,7 +1350,17 @@ async def update_admin_credentials(
             await apply_admin_home_return_mode()
             await apply_theme()
             await apply_log_retention_days()
-            return _success_response(message="管理员设置更新成功")
+            response = JSONResponse(content=_success_response(message="管理员设置更新成功"))
+            session_manager.create_session(
+                response=response,
+                user_data={
+                    "is_admin": True,
+                    "username": username,
+                },
+                remember=bool(session_data.get("remember")),
+                request=request,
+            )
+            return response
         
         if len(password) < 6:
             return _error_response(message="密码长度至少6位")
@@ -1357,6 +1369,8 @@ async def update_admin_credentials(
         
         await config_manager.set_async('admin_username', username)
         await config_manager.set_async('admin_password', password_hash)
+        await config_manager.set_async("admin_temp_password_hash", "")
+        await config_manager.set_async("admin_temp_password_expires_at", 0)
         if session_timeout is not None:
             await config_manager.set_async('session_timeout', session_timeout_seconds)
         if oauth_server_url:
@@ -1368,8 +1382,18 @@ async def update_admin_credentials(
         await apply_admin_home_return_mode()
         await apply_theme()
         await apply_log_retention_days()
-        
-        return _success_response(message="管理员设置更新成功")
+
+        response = JSONResponse(content=_success_response(message="管理员设置更新成功"))
+        session_manager.create_session(
+            response=response,
+            user_data={
+                "is_admin": True,
+                "username": username,
+            },
+            remember=bool(session_data.get("remember")),
+            request=request,
+        )
+        return response
         
     except Exception as e:
         return {

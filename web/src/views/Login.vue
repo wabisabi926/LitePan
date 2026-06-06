@@ -79,7 +79,10 @@
 
           <el-form-item>
             <div class="login-options">
-              <el-checkbox v-model="loginData.remember">
+              <el-checkbox
+                v-model="loginData.remember"
+                @keydown.enter.prevent="handleLogin"
+              >
                 保持登录（30天）
               </el-checkbox>
               <a href="#" class="forgot-link" @click.prevent="handleForgotPassword">忘记密码？</a>
@@ -162,30 +165,119 @@ watch(() => loginData.password, (val) => {
   passwordValue.value = val || ''
 })
 
+const escapeHtml = (value) => String(value || '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;')
+
+const formatCountdown = (seconds) => {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0))
+  const minutes = Math.floor(total / 60)
+  const restSeconds = total % 60
+  return `${String(minutes).padStart(2, '0')}:${String(restSeconds).padStart(2, '0')}`
+}
+
+const startTempPasswordCountdown = (targetId, expiresAt) => {
+  const targetExpiresAt = Number(expiresAt) || 0
+  if (!targetExpiresAt) return null
+
+  const updateCountdown = () => {
+    const target = document.getElementById(targetId)
+    if (!target) return
+
+    const remaining = Math.max(0, targetExpiresAt - Math.floor(Date.now() / 1000))
+    target.textContent = remaining > 0
+      ? `有效期剩余 ${formatCountdown(remaining)}`
+      : '临时密码已过期'
+    target.classList.toggle('is-expired', remaining <= 0)
+  }
+
+  updateCountdown()
+  return window.setInterval(updateCountdown, 1000)
+}
+
 const handleForgotPassword = () => {
   ElMessageBox.confirm(
-    '重置密码后，系统将生成一个随机的新密码，并输出到容器的控制台日志中。您需要查看容器日志获取新密码。确定要重置吗？',
+    `
+      <div class="reset-password-confirm">
+        <div class="reset-password-confirm__hero">
+          <div class="reset-password-confirm__icon" aria-hidden="true">
+            <span></span>
+          </div>
+          <div>
+            <div class="reset-password-confirm__title">生成临时密码</div>
+            <div class="reset-password-confirm__desc">
+              系统会在容器日志中输出一枚临时管理员密码。
+            </div>
+          </div>
+        </div>
+        <div class="reset-password-confirm__facts">
+          <div class="reset-password-confirm__fact">
+            <span class="reset-password-confirm__mark"></span>
+            <div>
+              <strong>完成改密后</strong>
+              <p>新密码会替换原密码，临时密码立即失效。</p>
+            </div>
+          </div>
+          <div class="reset-password-confirm__fact">
+            <span class="reset-password-confirm__mark"></span>
+            <div>
+              <strong>未改密前</strong>
+              <p>临时密码 10 分钟内有效，且不影响原密码。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    `,
     '重置密码确认',
     {
       confirmButtonText: '确定重置',
       cancelButtonText: '取消',
-      type: 'warning',
-      customClass: 'custom-confirm-box'
+      customClass: 'custom-confirm-box reset-password-box',
+      dangerouslyUseHTMLString: true
     }
   ).then(async () => {
     try {
       loading.value = true
       const response = await axios.post('/api/auth/reset-password')
       if (response.data.success) {
-        ElMessageBox.alert(
-          '密码已重置！请打开宿主机的终端，执行 <strong>docker logs litepan</strong> （或您自定义的容器名）来查看新生成的随机密码。',
-          '重置成功',
-          {
-            confirmButtonText: '我知道了',
-            type: 'success',
-            dangerouslyUseHTMLString: true
+        const serverMessage = escapeHtml(response.data.message || '')
+        const expiresAt = Number(response.data.data?.expires_at || 0)
+        const countdownId = `temp-password-countdown-${Date.now()}`
+        const countdownHtml = expiresAt
+          ? `<div id="${countdownId}" class="reset-password-result__countdown">有效期剩余 --:--</div>`
+          : ''
+        const html = `
+          <div class="reset-password-result">
+            <div class="reset-password-result__hero">
+              <div class="reset-password-result__icon" aria-hidden="true"></div>
+              <div class="reset-password-result__body">
+                <div class="reset-password-result__title-row">
+                  <div class="reset-password-result__title">临时密码已生成</div>
+                  ${countdownHtml}
+                </div>
+                ${serverMessage ? `<div class="reset-password-result__status">${serverMessage}</div>` : ''}
+              </div>
+            </div>
+            <div class="reset-password-result__command-card">
+            <div class="reset-password-result__label">宿主机终端执行(请将litepan替换为实际容器名)</div>
+              <div class="reset-password-result__code"><code>docker logs litepan</code></div>
+            </div>
+          </div>
+        `
+        const alertPromise = ElMessageBox.alert(html, '重置成功', {
+          confirmButtonText: '我知道了',
+          customClass: 'custom-confirm-box reset-password-box',
+          dangerouslyUseHTMLString: true
+        })
+        const countdownTimer = startTempPasswordCountdown(countdownId, expiresAt)
+        alertPromise.then(() => {}, () => {}).finally(() => {
+          if (countdownTimer) {
+            window.clearInterval(countdownTimer)
           }
-        )
+        })
       } else {
         window.appNotification.error(response.data.message || '重置失败')
       }
@@ -212,6 +304,7 @@ onMounted(async () => {
 })
 
 const handleLogin = async () => {
+  if (loading.value) return
   if (!loginForm.value) return
 
   try {
@@ -273,6 +366,293 @@ const handleLogin = async () => {
 .custom-confirm-box .el-message-box__btns .el-button {
   border-radius: 8px;
   padding: 8px 16px;
+}
+
+.reset-password-box {
+  width: 460px;
+  max-width: calc(100vw - 32px);
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+}
+
+.reset-password-box .el-message-box__header {
+  padding: 20px 22px 4px;
+}
+
+.reset-password-box .el-message-box__title {
+  font-size: 17px;
+  color: #0f172a;
+}
+
+.reset-password-box .el-message-box__content {
+  margin-top: 0;
+  padding: 12px 22px 8px;
+}
+
+.reset-password-box .el-message-box__message {
+  width: 100%;
+}
+
+.reset-password-box .el-message-box__btns {
+  padding: 12px 22px 22px;
+}
+
+.reset-password-box .el-message-box__btns .el-button {
+  min-width: 96px;
+  font-weight: 600;
+}
+
+.reset-password-confirm,
+.reset-password-result {
+  color: #334155;
+  line-height: 1.6;
+}
+
+.reset-password-confirm__hero,
+.reset-password-result__hero {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 12px;
+  align-items: start;
+  padding: 15px;
+  border-radius: 16px;
+  background:
+    linear-gradient(135deg, rgba(239, 246, 255, 0.98), rgba(255, 255, 255, 0.96)),
+    #fff;
+  border: 1px solid #dbeafe;
+}
+
+.reset-password-result__hero {
+  align-items: center;
+}
+
+.reset-password-confirm__icon,
+.reset-password-result__icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #1d4ed8, #38bdf8);
+  box-shadow: 0 12px 22px rgba(37, 99, 235, 0.24);
+  position: relative;
+}
+
+.reset-password-confirm__icon span,
+.reset-password-result__icon::before {
+  content: '';
+  width: 18px;
+  height: 18px;
+  border: 2px solid #fff;
+  border-radius: 50% 50% 6px 6px;
+  border-bottom-width: 6px;
+  display: block;
+}
+
+.reset-password-confirm__icon::after,
+.reset-password-result__icon::after {
+  content: '';
+  width: 14px;
+  height: 8px;
+  border: 2px solid #fff;
+  border-bottom: 0;
+  border-radius: 9px 9px 0 0;
+  position: absolute;
+  top: 11px;
+}
+
+.reset-password-confirm__title {
+  font-weight: 700;
+  color: #0f172a;
+  font-size: 18px;
+  margin-bottom: 6px;
+}
+
+.reset-password-confirm__desc {
+  color: #475569;
+  margin: 0;
+}
+
+.reset-password-confirm__facts {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.reset-password-confirm__fact {
+  display: grid;
+  grid-template-columns: 10px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 0 2px;
+}
+
+.reset-password-confirm__mark {
+  width: 4px;
+  height: 28px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #2563eb, #38bdf8);
+  margin-top: 2px;
+}
+
+.reset-password-confirm__fact strong {
+  display: block;
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.reset-password-confirm__fact p {
+  margin: 3px 0 0;
+  color: #64748b;
+}
+
+.reset-password-result__body {
+  min-width: 0;
+}
+
+.reset-password-result__title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.reset-password-result__title {
+  font-size: 18px;
+  font-weight: 800;
+  color: #0f172a;
+  line-height: 1.35;
+}
+
+.reset-password-result__status {
+  margin-top: 6px;
+  color: #475569;
+}
+
+.reset-password-result__countdown {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 22px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reset-password-result__countdown.is-expired {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.reset-password-result__command-card {
+  margin-top: 16px;
+  padding: 0 2px;
+}
+
+.reset-password-result__label {
+  font-size: 12px;
+  font-weight: 800;
+  color: #1d4ed8;
+  margin-bottom: 7px;
+}
+
+.reset-password-result__code {
+  background: #0f172a;
+  color: #e5eefb;
+  border-radius: 12px;
+  padding: 11px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  overflow: auto;
+  white-space: nowrap;
+}
+
+.reset-password-result__code code {
+  color: inherit;
+  font-size: 13px;
+}
+
+:root[data-theme="dark"] .reset-password-box {
+  background: #181b20;
+  border: 1px solid #2b3038;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
+}
+
+:root[data-theme="dark"] .reset-password-box .el-message-box__title,
+:root[data-theme="dark"] .reset-password-confirm__title,
+:root[data-theme="dark"] .reset-password-confirm__fact strong,
+:root[data-theme="dark"] .reset-password-result__title {
+  color: #e7eaf0;
+}
+
+:root[data-theme="dark"] .reset-password-box .el-message-box__content,
+:root[data-theme="dark"] .reset-password-confirm,
+:root[data-theme="dark"] .reset-password-result {
+  color: #cbd2dc;
+}
+
+:root[data-theme="dark"] .reset-password-confirm__desc,
+:root[data-theme="dark"] .reset-password-confirm__fact p,
+:root[data-theme="dark"] .reset-password-result__status {
+  color: #9099a8;
+}
+
+:root[data-theme="dark"] .reset-password-result__countdown {
+  background: rgba(37, 99, 235, 0.18);
+  color: #93c5fd;
+}
+
+:root[data-theme="dark"] .reset-password-result__countdown.is-expired {
+  background: rgba(239, 68, 68, 0.14);
+  color: #fca5a5;
+}
+
+:root[data-theme="dark"] .reset-password-confirm__hero,
+:root[data-theme="dark"] .reset-password-result__hero {
+  background:
+    linear-gradient(135deg, rgba(30, 64, 175, 0.22), rgba(15, 23, 42, 0.42)),
+    #1d222a;
+  border-color: rgba(96, 165, 250, 0.22);
+}
+
+:root[data-theme="dark"] .reset-password-result__label {
+  color: #93c5fd;
+}
+
+:root[data-theme="dark"] .reset-password-result__code {
+  background: #090d14;
+  color: #dbeafe;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+:root[data-theme="dark"] .reset-password-box .el-message-box__btns .el-button:not(.el-button--primary) {
+  background: #20252d;
+  border-color: #343b46;
+  color: #cbd2dc;
+}
+
+:root[data-theme="dark"] .reset-password-box .el-message-box__btns .el-button:not(.el-button--primary):hover {
+  background: #262d37;
+  border-color: #475569;
+  color: #e7eaf0;
+}
+
+@media (max-width: 560px) {
+  .reset-password-confirm__hero,
+  .reset-password-result__hero {
+    grid-template-columns: 1fr;
+  }
+
+  .reset-password-result__title-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
 }
 </style>
 

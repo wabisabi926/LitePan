@@ -53,6 +53,9 @@ async def require_admin_auth(request: Request):
     stored_username = config_manager.get("admin_username") or "admin"
     stored_password = config_manager.get("admin_password") or "admin"
     credential_state = assess_admin_credential_state(stored_username, stored_password)
+    if session_data.get("must_change_password") and request.url.path not in PASSWORD_CHANGE_EXEMPT_PATHS:
+        raise_forbidden("当前会话使用临时密码登录，请先到系统设置修改管理员密码")
+
     if credential_state["must_change_password"] and request.url.path not in PASSWORD_CHANGE_EXEMPT_PATHS:
         raise_forbidden("检测到管理员仍在使用默认或旧版明文密码，请先到系统设置修改密码")
 
