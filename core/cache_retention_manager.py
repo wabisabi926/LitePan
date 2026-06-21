@@ -27,6 +27,7 @@ class CacheRetentionTask:
     parent_id: str
     path: str
     recursive: bool
+    scan_depth: int
     api_interval: int
     refresh_interval: int
     status: TaskStatus
@@ -43,6 +44,25 @@ class CacheRetentionTask:
     scanned_files: int = 0
     started_at: Optional[datetime] = None
     last_duration_ms: int = 0
+
+
+MAX_SCAN_DEPTH = 5  # 产品上限：1..5 层，再深一律用无限递归(-1)，防止手工 API 传入超大层级把网盘打爆
+
+
+def _normalize_scan_depth(raw, recursive_fallback) -> int:
+    """归一化扫描层级：1..MAX_SCAN_DEPTH 为具体层级，-1 为无限递归。
+    旧任务没有 scan_depth（raw 为 None）时按 recursive 回退：递归→无限(-1)，单层→1。"""
+    if raw is None:
+        return -1 if recursive_fallback else 1
+    try:
+        depth = int(raw)
+    except (TypeError, ValueError):
+        return -1 if recursive_fallback else 1
+    if depth == -1:
+        return -1
+    if depth < 1:
+        return 1
+    return min(depth, MAX_SCAN_DEPTH)
 
 
 class CacheRetentionManager:
@@ -70,6 +90,7 @@ class CacheRetentionManager:
                     parent_id=config['parent_id'],
                     path=config['path'],
                     recursive=config['recursive'],
+                    scan_depth=_normalize_scan_depth(config.get('scan_depth'), config.get('recursive')),
                     api_interval=config['api_interval'],
                     refresh_interval=config['refresh_interval'],
                     status=TaskStatus(config['status']),
@@ -403,10 +424,10 @@ class CacheRetentionManager:
 
         token = _extra_api_delay.set(task.api_interval)
         try:
-            if task.recursive:
-                return await self._refresh_cache_recursive(driver, task.parent_id, task=task)
-            else:
+            if task.scan_depth == 1:
                 return await self._refresh_cache_single(driver, task.parent_id, task=task)
+            max_depth = None if task.scan_depth == -1 else task.scan_depth
+            return await self._refresh_cache_recursive(driver, task.parent_id, task=task, max_depth=max_depth)
         finally:
             _extra_api_delay.reset(token)
 
@@ -425,16 +446,18 @@ class CacheRetentionManager:
             self._logger.error(f"单层缓存刷新失败: {e}")
             raise
 
-    async def _refresh_cache_recursive(self, driver, parent_id: str, task=None) -> int:
+    async def _refresh_cache_recursive(self, driver, parent_id: str, task=None, max_depth: Optional[int] = None) -> int:
         total_files = 0
         total_dirs = 0
 
         try:
-            queue = [parent_id]
+            # 队列元素为 (目录ID, 该目录所在层级)，根目录为第 1 层；
+            # max_depth=None 表示无限递归，否则只下钻到第 max_depth 层。
+            queue = [(parent_id, 1)]
             processed_dirs = set()
 
             while queue:
-                current_dir = queue.pop(0)
+                current_dir, depth = queue.pop(0)
 
                 if current_dir in processed_dirs:
                     continue
@@ -454,10 +477,11 @@ class CacheRetentionManager:
                         task.scanned_dirs = len(processed_dirs)
                         task.scanned_files = total_files
 
-                    for file in dirs_only:
-                        dir_id = getattr(file, 'id', '')
-                        if dir_id:
-                            queue.append(dir_id)
+                    if max_depth is None or depth < max_depth:
+                        for file in dirs_only:
+                            dir_id = getattr(file, 'id', '')
+                            if dir_id:
+                                queue.append((dir_id, depth + 1))
 
                 except Exception as e:
                     if self._looks_like_auth_error(str(e)):
@@ -587,6 +611,7 @@ class CacheRetentionManager:
                 parent_id=config_data['parent_id'],
                 path=config_data['path'],
                 recursive=config_data['recursive'],
+                scan_depth=_normalize_scan_depth(config_data.get('scan_depth'), config_data.get('recursive')),
                 api_interval=config_data['api_interval'],
                 refresh_interval=config_data['refresh_interval'],
                 status=TaskStatus.RUNNING,
@@ -614,6 +639,7 @@ class CacheRetentionManager:
             task.parent_id = config_data['parent_id']
             task.path = config_data['path']
             task.recursive = config_data['recursive']
+            task.scan_depth = _normalize_scan_depth(config_data.get('scan_depth'), config_data.get('recursive'))
             task.api_interval = config_data['api_interval']
             task.refresh_interval = config_data['refresh_interval']
             task.time_window_enabled = bool(config_data.get('time_window_enabled') or False)
@@ -687,8 +713,8 @@ class CacheRetentionManager:
             await cache_cleaner._clear_directory_cache(str(task.account_id), task.parent_id)
             self._logger.debug(f"已清理任务 {task.config_id} 的根目录缓存: {task.parent_id}")
 
-            if task.recursive:
-                self._logger.debug(f"任务 {task.config_id} 为递归任务，建议手动清理子目录缓存")
+            if task.scan_depth != 1:
+                self._logger.debug(f"任务 {task.config_id} 为多层扫描任务，建议手动清理子目录缓存")
 
         except Exception as e:
             self._logger.error(f"清理任务缓存失败: {e}")

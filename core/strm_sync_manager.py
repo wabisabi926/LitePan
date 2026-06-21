@@ -61,6 +61,7 @@ class StrmSyncTask:
     time_window_enabled: bool = False
     time_start: str = "00:00"
     time_end: str = "00:00"
+    schedule_mode: str = "window"  # 'window'=按全局间隔(可叠加时间段闸门)，'daily'=每天 time_start 定时一次
     branch_check_enabled: bool = False
     scanned_dirs: int = 0
     scanned_files: int = 0
@@ -145,13 +146,17 @@ class StrmSyncManager:
                 time_window_enabled=bool(row.get("time_window_enabled") or False),
                 time_start=str(row.get("time_start") or "00:00"),
                 time_end=str(row.get("time_end") or "00:00"),
+                schedule_mode=("daily" if row.get("schedule_mode") == "daily" else "window"),
                 branch_check_enabled=bool(row.get("branch_check_enabled") or False),
             )
 
-            if task.status == "running" and task.last_scan:
-                task.next_run_time = task.last_scan + timedelta(minutes=scan_interval)
-            elif task.status == "running":
-                task.next_run_time = datetime.now()
+            if task.status == "running":
+                if task.schedule_mode == "daily":
+                    task.next_run_time = self._compute_next_run(task, scan_interval)
+                elif task.last_scan:
+                    task.next_run_time = self._compute_next_run(task, scan_interval, base=task.last_scan)
+                else:
+                    task.next_run_time = datetime.now()
             else:
                 task.next_run_time = None
 
@@ -387,7 +392,29 @@ class StrmSyncManager:
             await asyncio.sleep(2)
 
     @staticmethod
+    def _next_daily_run(time_start: str, base: Optional[datetime] = None) -> datetime:
+        """返回下一次每日定时时间：base 当天的 time_start，若已过则取次日同点。"""
+        base = base or datetime.now()
+        try:
+            h, m = map(int, str(time_start or "00:00").split(":"))
+        except (ValueError, AttributeError):
+            h, m = 0, 0
+        candidate = base.replace(hour=h, minute=m, second=0, microsecond=0)
+        if candidate <= base:
+            candidate += timedelta(days=1)
+        return candidate
+
+    def _compute_next_run(self, task: StrmSyncTask, scan_interval: int, base: Optional[datetime] = None) -> datetime:
+        """统一计算下次执行时间：每日定时模式忽略全局间隔，按 time_start 排次日；其余按间隔。"""
+        if task.schedule_mode == "daily":
+            return self._next_daily_run(task.time_start)
+        base = base or datetime.now()
+        return base + timedelta(minutes=scan_interval)
+
+    @staticmethod
     def _is_in_time_window(task: StrmSyncTask) -> bool:
+        if task.schedule_mode == "daily":
+            return True
         if not task.time_window_enabled:
             return True
         try:
@@ -1529,7 +1556,7 @@ class StrmSyncManager:
                 task.last_scan = datetime.now()
                 task.last_scan_status = "error"
                 task.error_message = "STRM播放地址基址未设置"
-                task.next_run_time = datetime.now() + timedelta(minutes=scan_interval)
+                task.next_run_time = self._compute_next_run(task, scan_interval)
                 return
 
             token = await self._get_strm_token()
@@ -1575,7 +1602,7 @@ class StrmSyncManager:
                 task.last_scan = datetime.now()
                 task.last_scan_status = "error"
                 task.error_message = "驱动实例不可用"
-                task.next_run_time = datetime.now() + timedelta(minutes=scan_interval)
+                task.next_run_time = self._compute_next_run(task, scan_interval)
                 return
 
             delay_token = _extra_api_delay.set(task.api_interval)
@@ -1884,7 +1911,7 @@ class StrmSyncManager:
             task.last_scan = datetime.now()
             task.last_scan_status = "success"
             task.error_message = None
-            task.next_run_time = datetime.now() + timedelta(minutes=scan_interval)
+            task.next_run_time = self._compute_next_run(task, scan_interval)
 
             await db.update_strm_sync_task(
                 task_id,
@@ -1968,7 +1995,7 @@ class StrmSyncManager:
                     task.scan_interval = scan_interval
                     task.concurrency = concurrency
                     self._task_concurrency_limit = task_concurrency_limit
-                    task.next_run_time = datetime.now() + timedelta(minutes=scan_interval)
+                    task.next_run_time = self._compute_next_run(task, scan_interval)
         finally:
             if delay_token is not None:
                 _extra_api_delay.reset(delay_token)

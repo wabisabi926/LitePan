@@ -24,6 +24,7 @@ class CacheRetentionConfig(BaseModel):
     parent_id: str
     path: str
     recursive: bool = False
+    scan_depth: Optional[int] = None
     api_interval: int = CACHE_RETENTION_DEFAULT_EXTRA_API_INTERVAL
     refresh_interval: int = 60
     time_window_enabled: bool = False
@@ -37,6 +38,7 @@ class CacheRetentionResponse(BaseModel):
     path: str
     account_name: str
     recursive: bool
+    scan_depth: Optional[int] = None
     api_interval: int
     refresh_interval: int
     status: str
@@ -91,21 +93,28 @@ async def create_cache_retention_config(config: CacheRetentionConfig, session_da
         account = await get_account_or_404(config.account_id)
         if not account.get('is_active', True):
             return _error_response(message="账号未启用")
-        
+
+        from core.cache_retention_manager import cache_retention_manager, _normalize_scan_depth
+        scan_depth = _normalize_scan_depth(config.scan_depth, config.recursive)
+        recursive = scan_depth != 1  # 与 scan_depth 保持一致，供旧逻辑/展示回退使用
+
         config_id = await db.add_cache_retention_config(
             account_id=config.account_id,
             parent_id=config.parent_id,
             path=config.path,
-            recursive=config.recursive,
+            recursive=recursive,
+            scan_depth=scan_depth,
             api_interval=config.api_interval,
             refresh_interval=config.refresh_interval,
             time_window_enabled=config.time_window_enabled,
             time_start=config.time_start,
             time_end=config.time_end,
         )
-        
-        from core.cache_retention_manager import cache_retention_manager
-        await cache_retention_manager.add_task(config_id, **config.dict())
+
+        task_data = config.dict()
+        task_data['recursive'] = recursive
+        task_data['scan_depth'] = scan_depth
+        await cache_retention_manager.add_task(config_id, **task_data)
         trigger_state = await cache_retention_manager.refresh_task_now(config_id)
 
         status_message = "配置创建成功"
@@ -133,23 +142,30 @@ async def update_cache_retention_config(config_id: int, config: CacheRetentionCo
         account = await get_account_or_404(config.account_id)
         if not account.get('is_active', True):
             return _error_response(message="账号未启用")
-        
+
+        from core.cache_retention_manager import cache_retention_manager, _normalize_scan_depth
+        scan_depth = _normalize_scan_depth(config.scan_depth, config.recursive)
+        recursive = scan_depth != 1
+
         success = await db.update_cache_retention_config(
             config_id,
             account_id=config.account_id,
             parent_id=config.parent_id,
             path=config.path,
-            recursive=config.recursive,
+            recursive=recursive,
+            scan_depth=scan_depth,
             api_interval=config.api_interval,
             refresh_interval=config.refresh_interval,
             time_window_enabled=config.time_window_enabled,
             time_start=config.time_start,
             time_end=config.time_end,
         )
-        
+
         if success:
-            from core.cache_retention_manager import cache_retention_manager
-            await cache_retention_manager.update_task(config_id, **config.dict())
+            task_data = config.dict()
+            task_data['recursive'] = recursive
+            task_data['scan_depth'] = scan_depth
+            await cache_retention_manager.update_task(config_id, **task_data)
             return _success_response(message="配置已更新")
         else:
             raise HTTPException(500, "更新配置失败")

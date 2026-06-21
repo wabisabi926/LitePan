@@ -51,6 +51,7 @@ class AsyncDatabase:
                     parent_id TEXT NOT NULL,
                     path TEXT NOT NULL,
                     recursive BOOLEAN DEFAULT FALSE,
+                    scan_depth INTEGER DEFAULT -1,
                     api_interval INTEGER DEFAULT 200,
                     refresh_interval INTEGER DEFAULT 30,
                     status TEXT DEFAULT 'running',
@@ -82,6 +83,7 @@ class AsyncDatabase:
                     sync_metadata BOOLEAN DEFAULT FALSE,
                     api_interval INTEGER DEFAULT 200,
                     branch_check_enabled BOOLEAN DEFAULT FALSE,
+                    schedule_mode TEXT DEFAULT 'window',
                     status TEXT DEFAULT 'running',
                     paused_reason TEXT,
                     file_count INTEGER DEFAULT 0,
@@ -182,6 +184,24 @@ class AsyncDatabase:
                         )
                     except Exception:
                         pass
+            await self._conn.commit()
+
+            # schedule_mode 字段迁移（strm_sync_tasks）：旧任务为 NULL，上层回退成 'window'，行为不变
+            try:
+                await self._conn.execute(
+                    "ALTER TABLE strm_sync_tasks ADD COLUMN schedule_mode TEXT"
+                )
+            except Exception:
+                pass
+            await self._conn.commit()
+
+            # scan_depth 字段迁移：不设默认值，旧任务为 NULL，由上层按 recursive 回退推断，行为不变
+            try:
+                await self._conn.execute(
+                    "ALTER TABLE cache_retention_configs ADD COLUMN scan_depth INTEGER"
+                )
+            except Exception:
+                pass
             await self._conn.commit()
 
             # api_interval 字段迁移（cache_retention_configs 原本就有，strm_sync_tasks 新增）
@@ -383,19 +403,20 @@ class AsyncDatabase:
                                        refresh_interval: int = 1800,
                                        time_window_enabled: bool = False,
                                        time_start: str = "00:00",
-                                       time_end: str = "00:00") -> int:
+                                       time_end: str = "00:00",
+                                       scan_depth: int = -1) -> int:
         async with self._conn.cursor() as cursor:
             await cursor.execute("""
                 INSERT INTO cache_retention_configs
-                (account_id, parent_id, path, recursive, api_interval, refresh_interval, status, time_window_enabled, time_start, time_end)
-                VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
-            """, (account_id, parent_id, path, recursive, api_interval, refresh_interval,
+                (account_id, parent_id, path, recursive, scan_depth, api_interval, refresh_interval, status, time_window_enabled, time_start, time_end)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
+            """, (account_id, parent_id, path, recursive, scan_depth, api_interval, refresh_interval,
                   1 if time_window_enabled else 0, time_start, time_end))
             await self._conn.commit()
             return cursor.lastrowid
 
     async def update_cache_retention_config(self, config_id: int, **kwargs) -> bool:
-        valid_fields = ['account_id', 'parent_id', 'path', 'recursive', 'api_interval', 'refresh_interval', 'status',
+        valid_fields = ['account_id', 'parent_id', 'path', 'recursive', 'scan_depth', 'api_interval', 'refresh_interval', 'status',
                        'paused_reason', 'file_count', 'last_refresh', 'last_refresh_status', 'error_message',
                        'time_window_enabled', 'time_start', 'time_end']
         updates = []
@@ -483,13 +504,14 @@ class AsyncDatabase:
         time_end: str = "00:00",
         api_interval: int = 0,
         branch_check_enabled: bool = False,
+        schedule_mode: str = "window",
     ) -> int:
         async with self._conn.cursor() as cursor:
             await cursor.execute(
                 """
                 INSERT INTO strm_sync_tasks
-                (name, account_id, parent_id, path, recursive, scan_interval, scan_mode, concurrency, extensions, exclude_dir_keywords, exclude_file_keywords, sync_metadata, api_interval, branch_check_enabled, status, time_window_enabled, time_start, time_end, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                (name, account_id, parent_id, path, recursive, scan_interval, scan_mode, concurrency, extensions, exclude_dir_keywords, exclude_file_keywords, sync_metadata, api_interval, branch_check_enabled, schedule_mode, status, time_window_enabled, time_start, time_end, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 (
                     name,
@@ -506,6 +528,7 @@ class AsyncDatabase:
                     1 if sync_metadata else 0,
                     api_interval,
                     1 if branch_check_enabled else 0,
+                    schedule_mode,
                     status,
                     1 if time_window_enabled else 0,
                     time_start,
@@ -544,6 +567,7 @@ class AsyncDatabase:
             "time_window_enabled",
             "time_start",
             "time_end",
+            "schedule_mode",
         }
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:

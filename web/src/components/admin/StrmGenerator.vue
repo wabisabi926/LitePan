@@ -1360,7 +1360,7 @@
               >
             </div>
             <div class="form-group">
-              <label>执行时间段</label>
+              <label>执行计划</label>
               <div class="time-window-display" @click="timePickerVisible = true">
                 <span>{{ timeWindowDisplay }}</span>
                 <svg class="time-window-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -1537,6 +1537,8 @@
       :startTime="form.time_start"
       :endTime="form.time_end"
       :allDay="form.time_window_mode === 'always'"
+      :allowDaily="true"
+      :mode="form.schedule_mode === 'daily' ? 'daily' : (form.time_window_mode === 'always' ? 'allday' : 'window')"
       @confirm="onTimeWheelConfirm"
       @cancel="closeTimePicker"
     />
@@ -1795,10 +1797,17 @@ const { selectFolder } = useFolderSelector()
 
 const timePickerVisible = ref(false)
 
-function onTimeWheelConfirm({ startTime, endTime, allDay }) {
-  if (allDay) {
+function onTimeWheelConfirm({ mode, startTime, endTime, allDay }) {
+  if (mode === 'daily') {
+    form.schedule_mode = 'daily'
+    form.time_window_mode = 'always'  // 每日定时不叠加时间段闸门
+    form.time_start = startTime
+    form.time_end = startTime
+  } else if (allDay) {
+    form.schedule_mode = 'window'
     form.time_window_mode = 'always'
   } else {
+    form.schedule_mode = 'window'
     form.time_window_mode = 'custom'
     form.time_start = startTime
     form.time_end = endTime
@@ -1852,7 +1861,8 @@ const form = reactive({
   branch_check_enabled: false,
   time_window_mode: 'always',
   time_start: '00:00',
-  time_end: '00:00'
+  time_end: '00:00',
+  schedule_mode: 'window'
 })
 
 const taskNameWidthLimit = 20
@@ -2000,6 +2010,7 @@ const clearHoveredTemporaryBranch = (branch) => {
 }
 
 const timeWindowDisplay = computed(() => {
+  if (form.schedule_mode === 'daily') return `每天 ${form.time_start} 执行`
   if (form.time_window_mode === 'always') return '全天'
   const [sh, sm] = form.time_start.split(':').map(Number)
   const [eh, em] = form.time_end.split(':').map(Number)
@@ -2321,7 +2332,8 @@ const openAddDialog = () => {
     branch_check_enabled: false,
     time_window_mode: 'always',
     time_start: '00:00',
-    time_end: '00:00'
+    time_end: '00:00',
+    schedule_mode: 'window'
   })
   showDialog.value = true
 }
@@ -2599,7 +2611,8 @@ const editTask = (task) => {
     branch_check_enabled: Boolean(task.branch_check_enabled),
     time_window_mode: task.time_window_enabled ? 'custom' : 'always',
     time_start: task.time_start || '00:00',
-    time_end: task.time_end || '00:00'
+    time_end: task.time_end || '00:00',
+    schedule_mode: task.schedule_mode === 'daily' ? 'daily' : 'window'
   })
   showDialog.value = true
 }

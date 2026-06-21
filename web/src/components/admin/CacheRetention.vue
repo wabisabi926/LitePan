@@ -234,17 +234,21 @@
           <!-- 配置参数 -->
           <div class="form-row">
             <div class="form-group">
-              <label>递归模式</label>
+              <label>扫描层级</label>
               <div class="custom-select" :class="{ open: recursiveSelectOpen }" @click.stop="toggleRecursiveSelect" data-type="recursive-select">
                 <div class="select-trigger">
-                  <span class="select-value">{{ newConfig.recursive ? '无限递归' : '单层缓存' }}</span>
+                  <span class="select-value">{{ scanDepthLabel(newConfig.scan_depth) }}</span>
                   <svg class="select-arrow" width="16" height="16" viewBox="0 0 20 20" fill="none">
                     <path stroke="#6b7280" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="m6 8 4 4 4-4"/>
                   </svg>
                 </div>
                 <div class="select-dropdown" v-show="recursiveSelectOpen">
-                  <div class="select-option" @click.stop="setRecursiveMode(false)">单层缓存</div>
-                  <div class="select-option" @click.stop="setRecursiveMode(true)">无限递归</div>
+                  <div
+                    v-for="opt in scanDepthOptions"
+                    :key="opt.value"
+                    class="select-option"
+                    @click.stop="setScanDepth(opt.value)"
+                  >{{ opt.label }}</div>
                 </div>
               </div>
             </div>
@@ -354,6 +358,7 @@ const newConfig = ref({
   parent_id: '',
   path: '',
   recursive: false,
+  scan_depth: 3,
   api_interval: defaultSettings.value.api_interval,
   refresh_interval: defaultSettings.value.refresh_interval,
   time_window_mode: 'always',
@@ -526,6 +531,7 @@ const showAddDialog = async () => {
       parent_id: '',
       path: '',
       recursive: false,
+      scan_depth: 3,
       api_interval: defaultSettings.value.api_interval,
       refresh_interval: defaultSettings.value.refresh_interval,
       time_window_mode: 'always',
@@ -592,7 +598,8 @@ const saveConfig = async () => {
       account_id: selectedAccount.value.id,
       parent_id: newConfig.value.parent_id,
       path: newConfig.value.path,
-      recursive: newConfig.value.recursive,
+      scan_depth: newConfig.value.scan_depth,
+      recursive: newConfig.value.scan_depth !== 1,
       api_interval: newConfig.value.api_interval,
       refresh_interval: newConfig.value.refresh_interval,
       time_window_enabled: newConfig.value.time_window_mode === 'custom',
@@ -744,6 +751,9 @@ const editConfig = (config) => {
     parent_id: config.parent_id,
     path: config.path,
     recursive: config.recursive,
+    scan_depth: (config.scan_depth === null || config.scan_depth === undefined)
+      ? (config.recursive ? -1 : 1)
+      : config.scan_depth,
     api_interval: config.api_interval,
     refresh_interval: config.refresh_interval,
     time_window_mode: config.time_window_enabled ? 'custom' : 'always',
@@ -835,11 +845,11 @@ const formatInterval = (minutes) => {
 const getConfigMeta = (config) => {
   const fileCount = Number(config?.file_count || 0)
   const fileText = config?.last_refresh ? `${formatFileCount(fileCount)} 个文件` : '待统计'
-  const recursiveText = config?.recursive ? '无限递归' : '单层缓存'
+  const depthText = scanDepthLabel(resolveScanDepth(config))
   return [
     config?.account_name || '未知账号',
     formatInterval(Number(config?.refresh_interval || 0)),
-    recursiveText,
+    depthText,
     fileText
   ].join(' · ')
 }
@@ -849,7 +859,7 @@ const getConfigTitle = (config) => {
     config?.path || '/',
     `账号：${config?.account_name || '未知账号'}`,
     `刷新间隔：${formatInterval(Number(config?.refresh_interval || 0))}`,
-    `递归方式：${config?.recursive ? '无限递归' : '单层缓存'}`,
+    `扫描层级：${scanDepthLabel(resolveScanDepth(config))}`,
     `文件数：${config?.last_refresh ? formatFileCount(Number(config?.file_count || 0)) : '待统计'}`,
     `创建时间：${formatDate(config?.created_at, '未知时间')}`
   ].join('\n')
@@ -977,8 +987,31 @@ const toggleRecursiveSelect = () => {
   }
 }
 
-const setRecursiveMode = (recursive) => {
-  newConfig.value.recursive = recursive
+const scanDepthOptions = [
+  { value: 1, label: '单层' },
+  { value: 2, label: '2 层' },
+  { value: 3, label: '3 层' },
+  { value: 4, label: '4 层' },
+  { value: 5, label: '5 层' },
+  { value: -1, label: '无限递归' }
+]
+
+const scanDepthLabel = (depth) => {
+  const opt = scanDepthOptions.find((o) => o.value === depth)
+  return opt ? opt.label : (depth === -1 ? '无限递归' : `${depth} 层`)
+}
+
+// 旧任务可能没有 scan_depth，按 recursive 回退推断
+const resolveScanDepth = (config) => {
+  if (config?.scan_depth === null || config?.scan_depth === undefined) {
+    return config?.recursive ? -1 : 1
+  }
+  return config.scan_depth
+}
+
+const setScanDepth = (depth) => {
+  newConfig.value.scan_depth = depth
+  newConfig.value.recursive = depth !== 1
   recursiveSelectOpen.value = false
 }
 

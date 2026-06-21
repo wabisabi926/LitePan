@@ -3,7 +3,7 @@
     <div v-if="visible" class="twp-overlay">
       <div class="twp-modal" @click.stop>
         <div class="twp-body">
-          <div class="twp-all-day-row">
+          <div class="twp-all-day-row" v-if="!allowDaily">
             <button
               type="button"
               class="twp-all-day-btn"
@@ -11,13 +11,25 @@
               @click="setAllDay"
             >全天</button>
           </div>
+          <div class="twp-all-day-row" v-else>
+            <div class="twp-mode-seg">
+              <button type="button" class="twp-mode-btn" :class="{ active: mode === 'allday' }" @click="setModeAllday">全天</button>
+              <button type="button" class="twp-mode-btn" :class="{ active: mode === 'window' }" @click="setModeWindow">时间段</button>
+              <button type="button" class="twp-mode-btn" :class="{ active: mode === 'daily' }" @click="setModeDaily">每天定时</button>
+            </div>
+          </div>
 
           <div class="twp-wheels-section">
             <div class="twp-labels-row">
-              <span class="twp-label">开始</span>
-              <span class="twp-label">结束</span>
+              <template v-if="mode === 'daily'">
+                <span class="twp-label twp-label-single">每天执行时间</span>
+              </template>
+              <template v-else>
+                <span class="twp-label">开始</span>
+                <span class="twp-label">结束</span>
+              </template>
             </div>
-            <div class="twp-wheels-row">
+            <div class="twp-wheels-row" :class="{ 'twp-daily': mode === 'daily' }">
               <div class="twp-wheel" @mouseenter="hoveredWheel = 'startHour'" @mouseleave="clearHover('startHour')">
                 <button v-show="isWheelActive('startHour')" type="button" class="twp-step twp-step-up" :disabled="!canStep('startHour', -1)" @mousedown.stop.prevent="startStepHold('startHour', -1)" @touchstart.stop.prevent="startStepHold('startHour', -1)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 14.5 12 8l6.5 6.5" /></svg></button>
                 <button v-show="isWheelActive('startHour')" type="button" class="twp-step twp-step-down" :disabled="!canStep('startHour', 1)" @mousedown.stop.prevent="startStepHold('startHour', 1)" @touchstart.stop.prevent="startStepHold('startHour', 1)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 9.5 12 16l6.5-6.5" /></svg></button>
@@ -28,12 +40,12 @@
                 <button v-show="isWheelActive('startMin')" type="button" class="twp-step twp-step-down" :disabled="!canStep('startMin', 1)" @mousedown.stop.prevent="startStepHold('startMin', 1)" @touchstart.stop.prevent="startStepHold('startMin', 1)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 9.5 12 16l6.5-6.5" /></svg></button>
                 <div v-for="m in 60" :key="'sm'+m" class="twp-item" :class="{ 'twp-sel': isCenter('startMin', m-1) }" :style="itemStyle('startMin', m-1)">{{ String(m-1).padStart(2,'0') }}</div>
               </div>
-              <div class="twp-wheel" @mouseenter="hoveredWheel = 'endHour'" @mouseleave="clearHover('endHour')">
+              <div class="twp-wheel" v-show="mode !== 'daily'" @mouseenter="hoveredWheel = 'endHour'" @mouseleave="clearHover('endHour')">
                 <button v-show="isWheelActive('endHour')" type="button" class="twp-step twp-step-up" :disabled="!canStep('endHour', -1)" @mousedown.stop.prevent="startStepHold('endHour', -1)" @touchstart.stop.prevent="startStepHold('endHour', -1)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 14.5 12 8l6.5 6.5" /></svg></button>
                 <button v-show="isWheelActive('endHour')" type="button" class="twp-step twp-step-down" :disabled="!canStep('endHour', 1)" @mousedown.stop.prevent="startStepHold('endHour', 1)" @touchstart.stop.prevent="startStepHold('endHour', 1)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 9.5 12 16l6.5-6.5" /></svg></button>
                 <div v-for="h in 24" :key="'eh'+h" class="twp-item" :class="{ 'twp-sel': isCenter('endHour', h-1) }" :style="itemStyle('endHour', h-1)">{{ String(h-1).padStart(2,'0') }}</div>
               </div>
-              <div class="twp-wheel" @mouseenter="hoveredWheel = 'endMin'" @mouseleave="clearHover('endMin')">
+              <div class="twp-wheel" v-show="mode !== 'daily'" @mouseenter="hoveredWheel = 'endMin'" @mouseleave="clearHover('endMin')">
                 <button v-show="isWheelActive('endMin')" type="button" class="twp-step twp-step-up" :disabled="!canStep('endMin', -1)" @mousedown.stop.prevent="startStepHold('endMin', -1)" @touchstart.stop.prevent="startStepHold('endMin', -1)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 14.5 12 8l6.5 6.5" /></svg></button>
                 <button v-show="isWheelActive('endMin')" type="button" class="twp-step twp-step-down" :disabled="!canStep('endMin', 1)" @mousedown.stop.prevent="startStepHold('endMin', 1)" @touchstart.stop.prevent="startStepHold('endMin', 1)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 9.5 12 16l6.5-6.5" /></svg></button>
                 <div v-for="m in 60" :key="'em'+m" class="twp-item" :class="{ 'twp-sel': isCenter('endMin', m-1) }" :style="itemStyle('endMin', m-1)">{{ String(m-1).padStart(2,'0') }}</div>
@@ -63,7 +75,9 @@ const props = defineProps({
   visible: { type: Boolean, default: false },
   startTime: { type: String, default: '00:00' },
   endTime: { type: String, default: '00:00' },
-  allDay: { type: Boolean, default: false }
+  allDay: { type: Boolean, default: false },
+  allowDaily: { type: Boolean, default: false },
+  mode: { type: String, default: '' }  // 'allday' | 'window' | 'daily'，仅 allowDaily 时生效
 })
 
 const emit = defineEmits(['confirm', 'cancel'])
@@ -76,6 +90,7 @@ const startM = ref(0)
 const endH = ref(0)
 const endM = ref(0)
 const isAllDay = ref(false)
+const mode = ref('window')
 
 const displayStartH = ref(0)
 const displayStartM = ref(0)
@@ -214,12 +229,21 @@ watch(() => props.visible, (v) => {
     activeColor.value = isDark ? '#e5edf8' : '#3b82f6'
     inactiveColor.value = isDark ? 'rgba(148, 163, 184, 0.78)' : '#9aa6b6'
     window.addEventListener('keydown', onKeydown, true)
-    if (props.allDay) {
+    if (props.allowDaily && props.mode === 'daily') {
+      const s = parse(props.startTime)
+      startH.value = s.h; startM.value = s.m
+      displayStartH.value = s.h; displayStartM.value = s.m
+      endH.value = 23; endM.value = 59
+      displayEndH.value = 23; displayEndM.value = 59
+      isAllDay.value = false
+      mode.value = 'daily'
+    } else if (props.allDay) {
       startH.value = 0; startM.value = 0
       endH.value = 23; endM.value = 59
       displayStartH.value = 0; displayStartM.value = 0
       displayEndH.value = 23; displayEndM.value = 59
       isAllDay.value = true
+      mode.value = 'allday'
     } else {
       const s = parse(props.startTime)
       const e = parse(props.endTime)
@@ -228,6 +252,7 @@ watch(() => props.visible, (v) => {
       displayStartH.value = s.h; displayStartM.value = s.m
       displayEndH.value = e.h; displayEndM.value = e.m
       checkAllDay()
+      mode.value = 'window'
     }
   } else {
     stopStepHold()
@@ -243,10 +268,34 @@ function setAllDay() {
   displayEndH.value = 23; displayEndM.value = 59
 }
 
+function setModeAllday() {
+  mode.value = 'allday'
+  setAllDay()
+}
+
+function setModeWindow() {
+  mode.value = 'window'
+  // 从全天切回时间段时给个非全天的默认区间，避免又被判成全天
+  if (startH.value === 0 && startM.value === 0 && endH.value === 23 && endM.value === 59) {
+    endH.value = 0; endM.value = 0
+    displayEndH.value = 0; displayEndM.value = 0
+  }
+  checkAllDay()
+}
+
+function setModeDaily() {
+  mode.value = 'daily'
+}
+
 function confirm() {
-  const allDay = startH.value === 0 && startM.value === 0 && endH.value === 23 && endM.value === 59
   const fmt = (h, m) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
-  emit('confirm', { allDay, startTime: fmt(startH.value, startM.value), endTime: fmt(endH.value, endM.value) })
+  if (props.allowDaily && mode.value === 'daily') {
+    const t = fmt(startH.value, startM.value)
+    emit('confirm', { mode: 'daily', allDay: false, startTime: t, endTime: t })
+    return
+  }
+  const allDay = startH.value === 0 && startM.value === 0 && endH.value === 23 && endM.value === 59
+  emit('confirm', { mode: allDay ? 'allday' : 'window', allDay, startTime: fmt(startH.value, startM.value), endTime: fmt(endH.value, endM.value) })
 }
 </script>
 
@@ -309,6 +358,50 @@ function confirm() {
   background: #3b82f6;
   border-color: #3b82f6;
   color: #fff;
+}
+
+.twp-mode-seg {
+  display: inline-flex;
+  background: #f1f5f9;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 22px;
+  padding: 3px;
+}
+
+.twp-mode-btn {
+  padding: 6px 18px;
+  border: 0;
+  background: transparent;
+  border-radius: 18px;
+  color: #94a3b8;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.twp-mode-btn:hover {
+  color: #3b82f6;
+}
+
+.twp-mode-btn.active {
+  background: #3b82f6;
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(59, 130, 246, 0.35);
+}
+
+.twp-label-single {
+  letter-spacing: 2px;
+}
+
+.twp-wheels-row.twp-daily {
+  justify-content: center;
+}
+
+.twp-wheels-row.twp-daily .twp-wheel {
+  flex: 0 0 96px;
 }
 
 .twp-labels-row {

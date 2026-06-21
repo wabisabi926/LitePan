@@ -287,6 +287,7 @@ class StrmTaskCreate(BaseModel):
     time_window_enabled: bool = False
     time_start: str = "00:00"
     time_end: str = "00:00"
+    schedule_mode: str = "window"
 
 
 class StrmTaskUpdate(BaseModel):
@@ -305,9 +306,11 @@ class StrmTaskUpdate(BaseModel):
     time_window_enabled: Optional[bool] = None
     time_start: Optional[str] = None
     time_end: Optional[str] = None
+    schedule_mode: Optional[str] = None
 
 
 _ALLOWED_SCAN_MODES = {"incremental_missing", "incremental_update", "full_sync"}
+_ALLOWED_SCHEDULE_MODES = {"window", "daily"}
 _ALLOWED_RUN_MODES = {"auto", "full", "branch"}
 _ALLOWED_BRANCH_TYPES = {"base", "temporary"}
 
@@ -420,6 +423,7 @@ async def create_task(payload: StrmTaskCreate, session_data: dict = Depends(requ
             return _error_response(message="扫描方式不支持")
 
         api_interval = max(0, min(int(payload.api_interval or 0), 5000))
+        schedule_mode = payload.schedule_mode if payload.schedule_mode in _ALLOWED_SCHEDULE_MODES else "window"
 
         defaults = await _get_default_strm_settings()
 
@@ -442,9 +446,12 @@ async def create_task(payload: StrmTaskCreate, session_data: dict = Depends(requ
             time_window_enabled=bool(payload.time_window_enabled),
             time_start=str(payload.time_start or "00:00"),
             time_end=str(payload.time_end or "00:00"),
+            schedule_mode=schedule_mode,
         )
         await strm_sync_manager.refresh_tasks_from_db()
-        await strm_sync_manager.run_task_now(task_id)
+        # 每日定时任务按设定时间执行，创建时不立即跑；其余维持原有“建好即跑一次”行为
+        if schedule_mode != "daily":
+            await strm_sync_manager.run_task_now(task_id)
         return _success_response(data={"id": task_id}, message="创建STRM任务成功")
     except Exception as e:
         return _error_response(message=f"创建STRM任务失败: {str(e)}")
@@ -511,6 +518,8 @@ async def update_task(task_id: int, payload: StrmTaskUpdate, session_data: dict 
             updates["time_start"] = str(payload.time_start or "00:00")
         if payload.time_end is not None:
             updates["time_end"] = str(payload.time_end or "00:00")
+        if payload.schedule_mode is not None:
+            updates["schedule_mode"] = payload.schedule_mode if payload.schedule_mode in _ALLOWED_SCHEDULE_MODES else "window"
 
         ok = await db.update_strm_sync_task(task_id, **updates)
         if not ok:
