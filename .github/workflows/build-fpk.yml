@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-amd64:
     runs-on: ubuntu-latest
@@ -26,9 +29,13 @@ jobs:
       - name: Build amd64 FPK
         run: |
           cd litepan-fpk/litepan-amd64
+          ls -la
           chmod +x cmd/*
+          ls -la ../../fnpack_linux/
           cp ../../fnpack_linux/fnpack_linux_amd64 fnpack
+          ls -la fnpack
           chmod +x fnpack
+          file fnpack
           ./fnpack build
           cp litepan.fpk ../litepan_amd64.fpk
 
@@ -57,9 +64,13 @@ jobs:
       - name: Build arm64 FPK
         run: |
           cd litepan-fpk/litepan-arm64
+          ls -la
           chmod +x cmd/*
+          ls -la ../../fnpack_linux/
           cp ../../fnpack_linux/fnpack_linux_arm64 fnpack
+          ls -la fnpack
           chmod +x fnpack
+          file fnpack
           ./fnpack build
           cp litepan.fpk ../litepan_arm64.fpk
 
