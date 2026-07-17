@@ -27,8 +27,7 @@ jobs:
         run: |
           cd litepan-fpk/litepan-amd64
           chmod +x cmd/*
-          wget -O fnpack https://github.com/wabisabi926/LitePan/releases/download/fnpack/fnpack_linux_amd64 || curl -L -o fnpack https://github.com/wabisabi926/LitePan/releases/download/fnpack/fnpack_linux_amd64
-          ls -la fnpack
+          cp ../../fnpack_linux/fnpack_linux_amd64 fnpack
           chmod +x fnpack
           ./fnpack build
           cp litepan.fpk ../litepan_amd64.fpk
@@ -59,8 +58,7 @@ jobs:
         run: |
           cd litepan-fpk/litepan-arm64
           chmod +x cmd/*
-          wget -O fnpack https://github.com/wabisabi926/LitePan/releases/download/fnpack/fnpack_linux_arm64 || curl -L -o fnpack https://github.com/wabisabi926/LitePan/releases/download/fnpack/fnpack_linux_arm64
-          ls -la fnpack
+          cp ../../fnpack_linux/fnpack_linux_arm64 fnpack
           chmod +x fnpack
           ./fnpack build
           cp litepan.fpk ../litepan_arm64.fpk
