@@ -1,4 +1,0 @@
-#!/bin/bash
-
-echo "LitePan 卸载回调完成"
-exit 0
