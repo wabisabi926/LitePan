@@ -29,12 +29,7 @@ jobs:
       - name: Build amd64 FPK
         run: |
           cd litepan-fpk/litepan-amd64
-          python3 -c "
-import json
-config = {'.url': {'litepan.Application': {'title': 'LitePan', 'icon': 'images/icon_{0}.png', 'type': 'url', 'protocol': '', 'port': '${LITEPAN_PORT}', 'url': '/', 'allUsers': False}}}
-with open('app/ui/config', 'w') as f:
-    json.dump(config, f)
-"
+          python3 -c "import json; config = {'.url': {'litepan.Application': {'title': 'LitePan', 'icon': 'images/icon_{0}.png', 'type': 'url', 'protocol': '', 'port': '${LITEPAN_PORT}', 'url': '/', 'allUsers': False}}}; json.dump(config, open('app/ui/config', 'w'))"
           cat app/ui/config
           chmod +x cmd/*
           cp ../../fnpack_linux/fnpack_linux_amd64 fnpack
@@ -67,12 +62,7 @@ with open('app/ui/config', 'w') as f:
       - name: Build arm64 FPK
         run: |
           cd litepan-fpk/litepan-arm64
-          python3 -c "
-import json
-config = {'.url': {'litepan.Application': {'title': 'LitePan', 'icon': 'images/icon_{0}.png', 'type': 'url', 'protocol': '', 'port': '${LITEPAN_PORT}', 'url': '/', 'allUsers': False}}}
-with open('app/ui/config', 'w') as f:
-    json.dump(config, f)
-"
+          python3 -c "import json; config = {'.url': {'litepan.Application': {'title': 'LitePan', 'icon': 'images/icon_{0}.png', 'type': 'url', 'protocol': '', 'port': '${LITEPAN_PORT}', 'url': '/', 'allUsers': False}}}; json.dump(config, open('app/ui/config', 'w'))"
           cat app/ui/config
           chmod +x cmd/*
           cp ../../fnpack_linux/fnpack_linux_arm64 fnpack
