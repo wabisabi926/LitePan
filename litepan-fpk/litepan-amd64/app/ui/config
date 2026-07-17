@@ -1,1 +1,13 @@
-[{"name":"LitePan","icon":"icon_256.png","protocol":"http","port":"${LITEPAN_PORT}","path":"/","description":"LitePan 网盘聚合管理工具"}]
+{
+    ".url": {
+        "litepan.Application": {
+            "title": "LitePan",
+            "icon": "images/icon_{0}.png",
+            "type": "url",
+            "protocol": "",
+            "port": "${LITEPAN_PORT}",
+            "url": "/",
+            "allUsers": false
+        }
+    }
+}
