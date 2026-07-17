@@ -54,7 +54,7 @@ jobs:
 
       - name: Build arm64 with QEMU
         run: |
-          docker run --rm -v "$(pwd):/workspace" --workdir /workspace arm64v8/python:3.11-slim-bookworm bash -c "
+          docker run --rm --platform linux/arm64 -v "$(pwd):/workspace" --workdir /workspace python:3.11-slim-bookworm bash -c "
             pip install --upgrade pip
             pip install --no-cache-dir --target=litepan-fpk/litepan-arm64/app/server/libs -r litepan-fpk/litepan-arm64/app/server/requirements.txt
             cd litepan-fpk/litepan-arm64
