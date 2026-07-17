@@ -11,10 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6.0.0
         with:
           python-version: '3.11'
 
@@ -27,13 +27,14 @@ jobs:
         run: |
           cd litepan-fpk/litepan-amd64
           chmod +x cmd/*
-          wget -O fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64
+          wget -O fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64 || curl -o fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64
+          ls -la fnpack
           chmod +x fnpack
           ./fnpack build
           cp litepan.fpk ../litepan_amd64.fpk
 
       - name: Upload amd64 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.4.3
         with:
           name: litepan-amd64
           path: litepan-fpk/litepan_amd64.fpk
@@ -42,10 +43,10 @@ jobs:
     runs-on: ubuntu-latest-arm64
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6.0.0
         with:
           python-version: '3.11'
 
@@ -58,13 +59,14 @@ jobs:
         run: |
           cd litepan-fpk/litepan-arm64
           chmod +x cmd/*
-          wget -O fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-arm64
+          wget -O fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-arm64 || curl -o fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-arm64
+          ls -la fnpack
           chmod +x fnpack
           ./fnpack build
           cp litepan.fpk ../litepan_arm64.fpk
 
       - name: Upload arm64 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.4.3
         with:
           name: litepan-arm64
           path: litepan-fpk/litepan_arm64.fpk
@@ -74,12 +76,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.4.3
         with:
           path: artifacts
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.0.4
         with:
           files: |
             artifacts/litepan-amd64/litepan_amd64.fpk
