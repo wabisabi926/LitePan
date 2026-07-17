@@ -44,31 +44,28 @@ jobs:
           path: litepan-fpk/litepan_amd64.fpk
 
   build-arm64:
-    runs-on: ubuntu-latest-arm64
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4.2.2
 
-      - name: Set up Python
-        uses: actions/setup-python@v6.0.0
-        with:
-          python-version: '3.11'
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
-      - name: Install dependencies
+      - name: Build arm64 with QEMU
         run: |
-          python -m pip install --upgrade pip
-          pip install --no-cache-dir --target=litepan-fpk/litepan-arm64/app/server/libs -r litepan-fpk/litepan-arm64/app/server/requirements.txt
-
-      - name: Build arm64 FPK
-        run: |
-          cd litepan-fpk/litepan-arm64
-          python3 -c "import json; config = {'.url': {'litepan.Application': {'title': 'LitePan', 'icon': 'images/icon_{0}.png', 'type': 'url', 'protocol': '', 'port': '${LITEPAN_PORT}', 'url': '/', 'allUsers': False}}}; json.dump(config, open('app/ui/config', 'w'))"
-          cat app/ui/config
-          chmod +x cmd/*
-          cp ../../fnpack_linux/fnpack_linux_arm64 fnpack
-          chmod +x fnpack
-          ./fnpack build
-          cp litepan.fpk ../litepan_arm64.fpk
+          docker run --rm -v "$(pwd):/workspace" --workdir /workspace arm64v8/python:3.11-slim-bookworm bash -c "
+            pip install --upgrade pip
+            pip install --no-cache-dir --target=litepan-fpk/litepan-arm64/app/server/libs -r litepan-fpk/litepan-arm64/app/server/requirements.txt
+            cd litepan-fpk/litepan-arm64
+            python3 -c \"import json; config = {'.url': {'litepan.Application': {'title': 'LitePan', 'icon': 'images/icon_{0}.png', 'type': 'url', 'protocol': '', 'port': '\${LITEPAN_PORT}', 'url': '/', 'allUsers': False}}}; json.dump(config, open('app/ui/config', 'w'))\"
+            cat app/ui/config
+            chmod +x cmd/*
+            cp ../../fnpack_linux/fnpack_linux_arm64 fnpack
+            chmod +x fnpack
+            ./fnpack build
+            cp litepan.fpk ../litepan_arm64.fpk
+          "
 
       - name: Upload arm64 artifact
         uses: actions/upload-artifact@v4.4.3
