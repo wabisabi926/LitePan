@@ -30,6 +30,8 @@ jobs:
         run: |
           cd litepan-fpk/litepan-amd64
           ls -la
+          cat app/ui/config
+          ls -la app/ui/
           chmod +x cmd/*
           ls -la ../../fnpack_linux/
           cp ../../fnpack_linux/fnpack_linux_amd64 fnpack
