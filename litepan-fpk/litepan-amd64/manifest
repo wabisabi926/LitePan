@@ -1,0 +1,13 @@
+appname               = litepan
+version = 0.3.2-Beta
+display_name          = LitePan
+desc                  = 轻量级网盘聚合管理工具，支持多网盘账号管理、WebDAV挂载、STRM生成、媒体整理等功能
+arch         = x86_64
+source       = thirdparty
+maintainer    = LitePan
+maintainer_url = https://www.litepan.top
+distributor    = LitePan
+distributor_url = https://www.litepan.top
+desktop_applaunchname=litepan.Application
+service_port=5211
+checkport=true

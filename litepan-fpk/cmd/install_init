@@ -1,0 +1,48 @@
+#!/bin/bash
+
+APP_DIR=$(cd "$(dirname "$0")/.." && pwd)
+SERVER_DIR="${APP_DIR}/app/server"
+DATA_DIR="${TRIM_APPDEST_VOL}/1000/apps/litepan/data"
+LOG_DIR="${TRIM_APPDEST_VOL}/1000/apps/litepan/log"
+STRM_DIR="${TRIM_APPDEST_VOL}/1000/apps/litepan/strm"
+PLUGINS_DIR="${TRIM_APPDEST_VOL}/1000/apps/litepan/plugins"
+VENV_DIR="${SERVER_DIR}/.venv"
+
+mkdir -p "${DATA_DIR}" "${LOG_DIR}" "${STRM_DIR}" "${PLUGINS_DIR}"
+
+PYTHON_BIN=$(which python3 2>/dev/null || which python 2>/dev/null)
+if [ -z "${PYTHON_BIN}" ]; then
+    echo "ERROR: Python3 未找到，请确保系统已安装 Python3"
+    exit 1
+fi
+
+echo "找到 Python: ${PYTHON_BIN}"
+"${PYTHON_BIN}" --version
+
+if [ -d "${VENV_DIR}" ]; then
+    echo "虚拟环境已存在，跳过创建"
+else
+    echo "正在创建 Python 虚拟环境..."
+    "${PYTHON_BIN}" -m venv "${VENV_DIR}"
+    if [ $? -ne 0 ]; then
+        echo "ERROR: 创建虚拟环境失败"
+        exit 1
+    fi
+    echo "虚拟环境创建成功"
+fi
+
+VENV_PYTHON="${VENV_DIR}/bin/python3"
+VENV_PIP="${VENV_DIR}/bin/pip"
+
+echo "正在升级 pip..."
+"${VENV_PIP}" install --upgrade pip > /dev/null 2>&1
+
+echo "正在安装 LitePan 依赖..."
+"${VENV_PIP}" install -r "${SERVER_DIR}/requirements.txt"
+if [ $? -ne 0 ]; then
+    echo "ERROR: 依赖安装失败，请检查网络连接"
+    exit 1
+fi
+
+echo "LitePan 安装初始化完成"
+exit 0

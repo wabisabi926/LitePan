@@ -1,0 +1,31 @@
+#!/bin/bash
+
+if [ -z "$TRIM_PKGETC" ]; then
+    echo "Error: TRIM_PKGETC environment variable is not set"
+    exit 1
+fi
+
+mkdir -p "$TRIM_PKGETC"
+
+ADMIN_USERNAME="${wizard_admin_username:-admin}"
+ADMIN_PASSWORD="${wizard_admin_password:-}"
+PORT="${wizard_port:-5211}"
+EMBY_PROXY_PORT="${wizard_emby_proxy_port:-8098}"
+
+if [ -z "$ADMIN_PASSWORD" ]; then
+    echo "Error: Admin password is required"
+    exit 1
+fi
+
+cat > "$TRIM_PKGETC/litepan.conf" << EOF
+LITEPAN_ADMIN_USERNAME=$ADMIN_USERNAME
+LITEPAN_ADMIN_PASSWORD=$ADMIN_PASSWORD
+LITEPAN_PORT=$PORT
+LITEPAN_EMBY_PROXY_PORT=$EMBY_PROXY_PORT
+EOF
+
+chmod 600 "$TRIM_PKGETC/litepan.conf"
+
+mkdir -p "${TRIM_PKGVAR}/data" "${TRIM_PKGVAR}/log" "${TRIM_PKGVAR}/strm" "${TRIM_PKGVAR}/plugins"
+
+exit 0

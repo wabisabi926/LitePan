@@ -1,0 +1,77 @@
+#!/bin/bash
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+
+APP_DIR=$(cd "$(dirname "$0")/.." && pwd)
+SERVER_DIR="${APP_DIR}/app/server"
+LIBS_DIR="${SERVER_DIR}/libs"
+
+start_process() {
+    if [ -f "${PID_FILE}" ]; then
+        pid=$(cat "${PID_FILE}")
+        if kill -0 "${pid}" 2>/dev/null; then
+            exit 0
+        fi
+        rm -f "${PID_FILE}"
+    fi
+
+    mkdir -p "${TRIM_PKGVAR}/data"
+    mkdir -p "${TRIM_PKGVAR}/log"
+    mkdir -p "${TRIM_PKGVAR}/strm"
+    mkdir -p "${TRIM_PKGVAR}/plugins"
+
+    PORT="5211"
+    if [ -f "${TRIM_PKGETC}/litepan.conf" ]; then
+        . "${TRIM_PKGETC}/litepan.conf"
+        PORT="${LITEPAN_PORT:-5211}"
+    fi
+
+    export PYTHONPATH="${LIBS_DIR}:${SERVER_DIR}"
+    export LITEPAN_PORT="${PORT}"
+    export LITEPAN_HOST="0.0.0.0"
+    export LITEPAN_DATA_DIR="${TRIM_PKGVAR}/data"
+    export LITEPAN_DATABASE_PATH="${TRIM_PKGVAR}/data/litepan.db"
+    export LITEPAN_LOG_DIR="${TRIM_PKGVAR}/log"
+    export LITEPAN_STRM_DIR="${TRIM_PKGVAR}/strm"
+    export LITEPAN_PLUGINS_DIR="${TRIM_PKGVAR}/plugins"
+
+    cd "${SERVER_DIR}"
+    nohup python3 main.py >> "${LOG_FILE}" 2>&1 &
+    echo "$!" > "${PID_FILE}"
+
+    exit 0
+}
+
+stop_process() {
+    if [ -f "${PID_FILE}" ]; then
+        pid=$(cat "${PID_FILE}")
+        kill -TERM "${pid}" 2>/dev/null
+        sleep 2
+        kill -KILL "${pid}" 2>/dev/null
+        rm -f "${PID_FILE}"
+    fi
+    exit 0
+}
+
+case "$1" in
+start)
+    start_process
+    ;;
+stop)
+    stop_process
+    ;;
+status)
+    if [ -f "${PID_FILE}" ]; then
+        pid=$(cat "${PID_FILE}")
+        if kill -0 "${pid}" 2>/dev/null; then
+            exit 0
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    exit 3
+    ;;
+*)
+    exit 1
+    ;;
+esac

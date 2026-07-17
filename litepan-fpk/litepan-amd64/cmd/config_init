@@ -1,0 +1,4 @@
+#!/bin/bash
+
+echo "LitePan 配置初始化完成"
+exit 0

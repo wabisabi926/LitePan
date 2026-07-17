@@ -1,0 +1,17 @@
+#!/bin/bash
+
+APP_DIR=$(cd "$(dirname "$0")/.." && pwd)
+PID_FILE="${APP_DIR}/litepan.pid"
+
+if [ -f "${PID_FILE}" ]; then
+    pid=$(cat "${PID_FILE}")
+    if kill -0 "${pid}" 2>/dev/null; then
+        kill "${pid}" 2>/dev/null
+        sleep 2
+        kill -9 "${pid}" 2>/dev/null
+    fi
+    rm -f "${PID_FILE}"
+fi
+
+echo "LitePan 配置回调完成"
+exit 0

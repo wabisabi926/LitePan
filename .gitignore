@@ -17,6 +17,10 @@ __pycache__/
 .coverage
 coverage/
 htmlcov/
+# FPK build libs (built by GitHub Actions)
+litepan-fpk/**/libs/
+# FPK packaging tool (local only)
+fnpack/
 
 # 前端依赖与构建缓存（保留 web/static 便于 clone 后直接运行）
 web/node_modules/
