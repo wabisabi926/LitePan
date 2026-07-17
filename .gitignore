@@ -21,6 +21,7 @@ htmlcov/
 litepan-fpk/**/libs/
 # FPK packaging tool (local only)
 fnpack/
+fnpack_linux/
 
 # 前端依赖与构建缓存（保留 web/static 便于 clone 后直接运行）
 web/node_modules/
